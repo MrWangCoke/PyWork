@@ -1,0 +1,4 @@
+[app]
+name = "pywork"
+default_workspace = "."
+permission_mode = "default"

@@ -1,0 +1,5 @@
+[tools]
+enable_file_tools = true
+enable_shell_tools = true
+enable_git_tools = true
+enable_mcp_tools = false

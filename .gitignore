@@ -1,0 +1,51 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PyWork local runtime
+.pywork/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# PyWork runtime files
+.pywork/cache/
+.pywork/logs/
+.pywork/sessions/
+.pywork/artifacts/
+.pywork/tmp/
+.pywork/checkpoints/
+
+# SQLite runtime db
+*.sqlite
+*.sqlite3
+
+*.docx
