@@ -384,14 +384,22 @@ def create_default_registry() -> ToolRegistry:
     """
     创建默认工具注册表。
 
-    当前阶段只注册 EchoTool。
-    后面会在这里注册：
+    当前阶段注册：
+    - EchoTool
+    - FileReadTool
+    - GlobTool
+    - GrepTool
+
+    后面会在这里继续注册：
     - BashTool
-    - ReadFileTool
     - WriteFileTool
     - EditFileTool
-    - SearchTool
     """
+
+    from pywork.tools.file_read import FileReadTool
+    from pywork.tools.glob import GlobTool
+    from pywork.tools.grep import GrepTool
+
     registry = ToolRegistry()
 
     registry.register(
@@ -399,8 +407,22 @@ def create_default_registry() -> ToolRegistry:
         source="builtin",
     )
 
-    return registry
+    registry.register(
+        FileReadTool(),
+        source="builtin",
+    )
 
+    registry.register(
+        GlobTool(),
+        source="builtin",
+    )
+
+    registry.register(
+        GrepTool(),
+        source="builtin",
+    )
+
+    return registry
 
 _DEFAULT_REGISTRY: ToolRegistry | None = None
 

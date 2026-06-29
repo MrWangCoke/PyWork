@@ -1,0 +1,779 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Iterable
+
+from pywork.schemas.message_schema import (
+    AnyMessage,
+    AssistantMessage,
+    ErrorMessage,
+    MessageRole,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+    create_assistant_message,
+    create_error_message,
+    create_system_message,
+    create_tool_message,
+    create_user_message,
+)
+from pywork.schemas.tool_schema import ToolCall, ToolResult, ToolRiskLevel
+
+
+class MessageConversionError(Exception):
+    """
+    消息格式转换异常。
+    """
+
+    pass
+
+
+def get_attr_or_key(value: Any, name: str, default: Any = None) -> Any:
+    """
+    同时兼容 dict 和 SDK 返回对象。
+
+    例如 OpenAI SDK 可能返回对象：
+        tool_call.function.name
+
+    也可能被我们转换成 dict：
+        tool_call["function"]["name"]
+    """
+    if value is None:
+        return default
+
+    if isinstance(value, dict):
+        return value.get(name, default)
+
+    return getattr(value, name, default)
+
+
+def role_value(message: AnyMessage) -> str:
+    role = message.role
+
+    if isinstance(role, MessageRole):
+        return role.value
+
+    return str(role)
+
+
+def safe_json_dumps(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def safe_json_loads(value: str) -> Any:
+    if not value:
+        return {}
+
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return {
+            "input": value,
+        }
+
+
+def tool_call_to_openai(tool_call: ToolCall) -> dict[str, Any]:
+    """
+    PyWork ToolCall -> OpenAI tool_call 格式。
+    """
+    return {
+        "id": tool_call.call_id,
+        "type": "function",
+        "function": {
+            "name": tool_call.tool_name,
+            "arguments": safe_json_dumps(tool_call.arguments),
+        },
+    }
+
+
+def openai_tool_call_to_tool_call(raw_tool_call: Any) -> ToolCall:
+    """
+    OpenAI tool_call -> PyWork ToolCall。
+
+    兼容 dict 和 SDK object。
+    """
+    call_id = str(
+        get_attr_or_key(
+            raw_tool_call,
+            "id",
+            "",
+        )
+    )
+
+    function = get_attr_or_key(raw_tool_call, "function", {}) or {}
+
+    name = str(
+        get_attr_or_key(
+            function,
+            "name",
+            "",
+        )
+    ).strip()
+
+    raw_arguments = get_attr_or_key(
+        function,
+        "arguments",
+        "{}",
+    )
+
+    if not name:
+        raise MessageConversionError("OpenAI tool call missing function.name")
+
+    if isinstance(raw_arguments, str):
+        arguments = safe_json_loads(raw_arguments)
+    elif isinstance(raw_arguments, dict):
+        arguments = raw_arguments
+    else:
+        arguments = {
+            "input": raw_arguments,
+        }
+
+    if not isinstance(arguments, dict):
+        arguments = {
+            "input": arguments,
+        }
+
+    return ToolCall(
+        call_id=call_id or None,  # type: ignore[arg-type]
+        tool_name=name,
+        arguments=arguments,
+        risk_level=ToolRiskLevel.LOW,
+        metadata={
+            "source": "openai_tool_call",
+        },
+    )
+
+
+def tool_definition_to_openai(tool_definition: dict[str, Any]) -> dict[str, Any]:
+    """
+    PyWork tool definition -> OpenAI tool schema。
+
+    输入来自：
+        BaseTool.get_definition()
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": tool_definition["name"],
+            "description": tool_definition.get("description", ""),
+            "parameters": tool_definition.get(
+                "input_schema",
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
+        },
+    }
+
+
+def tool_definitions_to_openai(
+    tool_definitions: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        tool_definition_to_openai(definition)
+        for definition in tool_definitions
+    ]
+
+
+def message_to_openai(message: AnyMessage) -> dict[str, Any] | None:
+    """
+    PyWork Message -> OpenAI message。
+
+    注意：
+    ErrorMessage 不直接发给模型，默认转成 system 提示。
+    """
+    role = role_value(message)
+
+    if role == "system":
+        return {
+            "role": "system",
+            "content": message.content,
+        }
+
+    if role == "user":
+        return {
+            "role": "user",
+            "content": message.content,
+        }
+
+    if role == "assistant":
+        assistant = message
+
+        payload: dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant.content or None,
+        }
+
+        tool_calls = getattr(assistant, "tool_calls", [])
+
+        if tool_calls:
+            payload["tool_calls"] = [
+                tool_call_to_openai(call)
+                for call in tool_calls
+            ]
+
+        return payload
+
+    if role == "tool":
+        tool_message = message
+
+        return {
+            "role": "tool",
+            "tool_call_id": getattr(tool_message, "tool_call_id", ""),
+            "content": tool_message.content,
+        }
+
+    if role == "error":
+        return {
+            "role": "system",
+            "content": f"Runtime error: {message.content}",
+        }
+
+    return None
+
+
+def messages_to_openai(messages: list[AnyMessage]) -> list[dict[str, Any]]:
+    """
+    PyWork messages -> OpenAI/OpenAI-compatible messages。
+    """
+    converted: list[dict[str, Any]] = []
+
+    for message in messages:
+        item = message_to_openai(message)
+
+        if item is not None:
+            converted.append(item)
+
+    return converted
+
+
+def openai_message_to_pywork(raw_message: Any) -> AnyMessage:
+    """
+    OpenAI message -> PyWork Message。
+
+    兼容 dict 和 SDK object。
+    """
+    role = str(
+        get_attr_or_key(
+            raw_message,
+            "role",
+            "assistant",
+        )
+    )
+
+    content = get_attr_or_key(
+        raw_message,
+        "content",
+        "",
+    )
+
+    if content is None:
+        content = ""
+
+    if role == "system":
+        return create_system_message(str(content))
+
+    if role == "user":
+        return create_user_message(str(content))
+
+    if role == "assistant":
+        raw_tool_calls = get_attr_or_key(
+            raw_message,
+            "tool_calls",
+            None,
+        )
+
+        tool_calls: list[ToolCall] = []
+
+        if raw_tool_calls:
+            tool_calls = [
+                openai_tool_call_to_tool_call(raw_call)
+                for raw_call in raw_tool_calls
+            ]
+
+        return create_assistant_message(
+            str(content),
+            tool_calls=tool_calls,
+            metadata={
+                "source": "openai_message",
+            },
+        )
+
+    if role == "tool":
+        tool_call_id = str(
+            get_attr_or_key(
+                raw_message,
+                "tool_call_id",
+                "",
+            )
+        )
+
+        name = str(
+            get_attr_or_key(
+                raw_message,
+                "name",
+                "unknown_tool",
+            )
+        )
+
+        call = ToolCall(
+            call_id=tool_call_id or None,  # type: ignore[arg-type]
+            tool_name=name,
+            arguments={},
+            risk_level=ToolRiskLevel.LOW,
+            metadata={
+                "source": "openai_tool_message",
+            },
+        )
+
+        result = ToolResult.success_result(
+            call=call,
+            content=str(content),
+            data={
+                "content": content,
+            },
+        )
+
+        return create_tool_message(
+            tool_result=result,
+        )
+
+    return create_error_message(
+        f"Unsupported OpenAI message role: {role}",
+        error_type="MessageConversionError",
+    )
+
+
+def openai_messages_to_pywork(raw_messages: Iterable[Any]) -> list[AnyMessage]:
+    return [
+        openai_message_to_pywork(message)
+        for message in raw_messages
+    ]
+
+
+def tool_call_to_anthropic_block(tool_call: ToolCall) -> dict[str, Any]:
+    """
+    PyWork ToolCall -> Anthropic tool_use block。
+    """
+    return {
+        "type": "tool_use",
+        "id": tool_call.call_id,
+        "name": tool_call.tool_name,
+        "input": tool_call.arguments,
+    }
+
+
+def tool_definition_to_anthropic(tool_definition: dict[str, Any]) -> dict[str, Any]:
+    """
+    PyWork tool definition -> Anthropic tool schema。
+    """
+    return {
+        "name": tool_definition["name"],
+        "description": tool_definition.get("description", ""),
+        "input_schema": tool_definition.get(
+            "input_schema",
+            {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
+    }
+
+
+def tool_definitions_to_anthropic(
+    tool_definitions: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        tool_definition_to_anthropic(definition)
+        for definition in tool_definitions
+    ]
+
+
+def messages_to_anthropic_system(messages: list[AnyMessage]) -> str | None:
+    """
+    Anthropic Messages API 的 system 是单独字段，不在 messages 数组里。
+    """
+    system_parts = [
+        message.content
+        for message in messages
+        if role_value(message) == "system" and message.content
+    ]
+
+    if not system_parts:
+        return None
+
+    return "\n\n".join(system_parts)
+
+
+def message_to_anthropic(message: AnyMessage) -> dict[str, Any] | None:
+    """
+    PyWork Message -> Anthropic message。
+
+    Anthropic 只接受 user / assistant 两类 message。
+    tool_result 要放在 user message content block 里。
+    """
+    role = role_value(message)
+
+    if role == "system":
+        return None
+
+    if role == "user":
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": message.content,
+                }
+            ],
+        }
+
+    if role == "assistant":
+        assistant = message
+        content_blocks: list[dict[str, Any]] = []
+
+        if assistant.content:
+            content_blocks.append(
+                {
+                    "type": "text",
+                    "text": assistant.content,
+                }
+            )
+
+        tool_calls = getattr(assistant, "tool_calls", [])
+
+        for call in tool_calls:
+            content_blocks.append(
+                tool_call_to_anthropic_block(call)
+            )
+
+        return {
+            "role": "assistant",
+            "content": content_blocks,
+        }
+
+    if role == "tool":
+        tool_call_id = getattr(message, "tool_call_id", "")
+
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": message.content,
+                }
+            ],
+        }
+
+    if role == "error":
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Runtime error: {message.content}",
+                }
+            ],
+        }
+
+    return None
+
+
+def messages_to_anthropic(messages: list[AnyMessage]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+
+    for message in messages:
+        item = message_to_anthropic(message)
+
+        if item is not None:
+            converted.append(item)
+
+    return converted
+
+
+def messages_to_anthropic_payload(
+    messages: list[AnyMessage],
+    *,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    PyWork messages -> Anthropic request payload。
+    """
+    payload: dict[str, Any] = {
+        "messages": messages_to_anthropic(messages),
+    }
+
+    system = messages_to_anthropic_system(messages)
+
+    if system:
+        payload["system"] = system
+
+    if model:
+        payload["model"] = model
+
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+
+    if tools is not None:
+        payload["tools"] = tools
+
+    return payload
+
+
+def anthropic_block_to_text(block: Any) -> str:
+    block_type = get_attr_or_key(block, "type", "")
+
+    if block_type == "text":
+        return str(
+            get_attr_or_key(
+                block,
+                "text",
+                "",
+            )
+        )
+
+    return ""
+
+
+def anthropic_tool_use_block_to_tool_call(block: Any) -> ToolCall:
+    block_id = str(
+        get_attr_or_key(
+            block,
+            "id",
+            "",
+        )
+    )
+
+    name = str(
+        get_attr_or_key(
+            block,
+            "name",
+            "",
+        )
+    )
+
+    input_data = get_attr_or_key(
+        block,
+        "input",
+        {},
+    )
+
+    if not isinstance(input_data, dict):
+        input_data = {
+            "input": input_data,
+        }
+
+    if not name:
+        raise MessageConversionError("Anthropic tool_use block missing name")
+
+    return ToolCall(
+        call_id=block_id or None,  # type: ignore[arg-type]
+        tool_name=name,
+        arguments=input_data,
+        risk_level=ToolRiskLevel.LOW,
+        metadata={
+            "source": "anthropic_tool_use",
+        },
+    )
+
+
+def anthropic_message_to_pywork(raw_message: Any) -> AssistantMessage:
+    """
+    Anthropic response message -> PyWork AssistantMessage。
+
+    Anthropic assistant response content 是 blocks：
+    - text
+    - tool_use
+    """
+    content_blocks = get_attr_or_key(
+        raw_message,
+        "content",
+        [],
+    )
+
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+
+    for block in content_blocks:
+        block_type = get_attr_or_key(block, "type", "")
+
+        if block_type == "text":
+            text = anthropic_block_to_text(block)
+
+            if text:
+                text_parts.append(text)
+
+        elif block_type == "tool_use":
+            tool_calls.append(
+                anthropic_tool_use_block_to_tool_call(block)
+            )
+
+    return create_assistant_message(
+        "\n".join(text_parts),
+        tool_calls=tool_calls,
+        metadata={
+            "source": "anthropic_message",
+        },
+    )
+
+
+def to_provider_messages(
+    messages: list[AnyMessage],
+    *,
+    provider_format: str,
+) -> Any:
+    """
+    统一入口：PyWork messages -> provider messages。
+
+    provider_format:
+    - openai
+    - openai_compatible
+    - anthropic
+    """
+    normalized = provider_format.strip().lower()
+
+    if normalized in {"openai", "openai_compatible", "deepseek", "qwen"}:
+        return messages_to_openai(messages)
+
+    if normalized == "anthropic":
+        return messages_to_anthropic_payload(messages)
+
+    raise MessageConversionError(f"Unsupported provider format: {provider_format!r}")
+
+
+def from_provider_message(
+    raw_message: Any,
+    *,
+    provider_format: str,
+) -> AnyMessage:
+    """
+    统一入口：provider message -> PyWork message。
+    """
+    normalized = provider_format.strip().lower()
+
+    if normalized in {"openai", "openai_compatible", "deepseek", "qwen"}:
+        return openai_message_to_pywork(raw_message)
+
+    if normalized == "anthropic":
+        return anthropic_message_to_pywork(raw_message)
+
+    raise MessageConversionError(f"Unsupported provider format: {provider_format!r}")
+
+
+def main() -> int:
+    from pywork.schemas.message_schema import (
+        messages_to_json,
+    )
+    from pywork.schemas.tool_schema import create_tool_call
+
+    system = create_system_message("You are PyWork, a coding agent.")
+    user = create_user_message("请调用 echo 工具。")
+
+    call = create_tool_call(
+        tool_name="echo",
+        arguments={
+            "text": "hello",
+        },
+    )
+
+    assistant = create_assistant_message(
+        "我将调用 echo 工具。",
+        tool_calls=[call],
+    )
+
+    result = ToolResult.success_result(
+        call=call,
+        content="hello",
+        data={
+            "text": "hello",
+        },
+    )
+
+    tool_message = create_tool_message(
+        tool_result=result,
+    )
+
+    messages: list[AnyMessage] = [
+        system,
+        user,
+        assistant,
+        tool_message,
+    ]
+
+    print("PyWork messages:")
+    print(messages_to_json(messages, indent=2))
+
+    print("\nOpenAI messages:")
+    print(
+        json.dumps(
+            messages_to_openai(messages),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    print("\nAnthropic system:")
+    print(messages_to_anthropic_system(messages))
+
+    print("\nAnthropic messages:")
+    print(
+        json.dumps(
+            messages_to_anthropic(messages),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    print("\nOpenAI tools:")
+    tool_definitions = [
+        {
+            "name": "echo",
+            "description": "Echo input text.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                    }
+                },
+                "required": ["text"],
+            },
+        }
+    ]
+
+    print(
+        json.dumps(
+            tool_definitions_to_openai(tool_definitions),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    print("\nAnthropic tools:")
+    print(
+        json.dumps(
+            tool_definitions_to_anthropic(tool_definitions),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
