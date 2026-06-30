@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from pywork.runtime.events import RuntimeEventBus, get_default_event_bus
 from pywork.runtime.graph import AgentGraphRunner
 from pywork.runtime.state import AgentState, AgentStatus, create_agent_state
 from pywork.tools.registry import ToolRegistry, create_default_registry
@@ -178,20 +179,31 @@ class RuntimeEngine:
         config: dict[str, Any] | None = None,
         agent_state: AgentState | None = None,
         engine_config: RuntimeEngineConfig | None = None,
+        event_bus: RuntimeEventBus | None = None,
+        emit_events: bool = True,
     ) -> None:
         self.registry = registry or create_default_registry()
         self.config = config or {}
         self.engine_config = engine_config or RuntimeEngineConfig()
+        self.event_bus = event_bus or get_default_event_bus()
+        self.emit_events = emit_events
 
         self.agent_state = agent_state or create_agent_state(
-            system_prompt=self.engine_config.system_prompt,
-            max_iterations=self.engine_config.max_iterations,
+            system_prompt=None,
+            max_iterations=int(
+                self.config.get("agent", {}).get(
+                    "max_iterations",
+                    self.engine_config.max_iterations,
+                )
+            ),
             metadata=self.engine_config.metadata,
         )
 
         self.graph_runner = AgentGraphRunner(
             registry=self.registry,
             config=self.config,
+            event_bus=self.event_bus,
+            emit_events=self.emit_events,
         )
 
         self.status: RuntimeStatus = RuntimeStatus.IDLE
@@ -369,8 +381,13 @@ class RuntimeEngine:
                 self.agent_state.reset_runtime()
             else:
                 self.agent_state = create_agent_state(
-                    system_prompt=self.engine_config.system_prompt,
-                    max_iterations=self.engine_config.max_iterations,
+                    system_prompt=None,
+                    max_iterations=int(
+                        self.config.get("agent", {}).get(
+                            "max_iterations",
+                            self.engine_config.max_iterations,
+                        )
+                    ),
                     metadata=self.engine_config.metadata,
                 )
 

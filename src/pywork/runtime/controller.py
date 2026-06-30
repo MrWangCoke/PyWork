@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncGenerator, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -12,6 +14,19 @@ from pywork.runtime.engine import (
     RuntimeEngine,
     RuntimeRunResult,
     RuntimeStatus,
+)
+from pywork.runtime.events import (
+    RuntimeEvent,
+    RuntimeEventBus,
+    RuntimeEventType,
+    get_default_event_bus,
+    new_run_id,
+)
+from pywork.runtime.streaming import (
+    RuntimeEventStream,
+    RuntimeStreamCloseReason,
+    RuntimeStreamConfig,
+    normalize_event_types,
 )
 from pywork.state.app_state import AppState, create_app_state
 from pywork.state.session_state import SessionStatus
@@ -177,17 +192,24 @@ class RuntimeController:
         registry: ToolRegistry | None = None,
         config: dict[str, Any] | None = None,
         controller_config: RuntimeControllerConfig | None = None,
+        event_bus: RuntimeEventBus | None = None,
+        emit_events: bool = True,
     ) -> None:
         self.app_state = app_state or create_app_state(
             config=config or {},
         )
 
         self.controller_config = controller_config or RuntimeControllerConfig()
+        self.event_bus = event_bus or get_default_event_bus()
+        self.emit_events = emit_events
+        self._last_stream_result: RuntimeControllerRunResult | None = None
 
         self.engine = engine or RuntimeEngine(
             registry=registry or self.app_state.tool_registry,
             config=config or self.app_state.config,
             agent_state=None,
+            event_bus=self.event_bus,
+            emit_events=self.emit_events,
         )
 
         self.status: RuntimeControllerStatus = RuntimeControllerStatus.READY
@@ -532,6 +554,74 @@ class RuntimeController:
                 },
             )
 
+    async def stream(
+        self,
+        user_input: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        event_types: Iterable[RuntimeEventType | str] | None = None,
+        include_history: bool = False,
+    ) -> AsyncGenerator[RuntimeEvent, None]:
+        text = self._prepare_user_input(user_input)
+        run_id = new_run_id()
+        session_id = getattr(self.app_state.session, "session_id", None)
+        normalized_event_types = normalize_event_types(event_types)
+
+        if normalized_event_types is not None:
+            normalized_event_types.add(RuntimeEventType.LIFECYCLE)
+            normalized_event_types.add(RuntimeEventType.ERROR)
+
+        stream = RuntimeEventStream(
+            self.event_bus,
+            config=RuntimeStreamConfig(
+                run_id=run_id,
+                session_id=session_id,
+                event_types=normalized_event_types,
+                include_history=include_history,
+                auto_close_on_terminal=True,
+                close_on_error_event=True,
+            ),
+        )
+
+        stream.start()
+
+        run_metadata = {
+            **(metadata or {}),
+            "source": "runtime_controller.stream",
+            "run_id": run_id,
+            "session_id": session_id,
+        }
+
+        run_task = asyncio.create_task(
+            self.arun(
+                text,
+                metadata=run_metadata,
+            )
+        )
+
+        completed_normally = False
+
+        try:
+            async for event in stream:
+                yield event
+
+            completed_normally = True
+            self._last_stream_result = await run_task
+
+        finally:
+            await stream.aclose(
+                reason=RuntimeStreamCloseReason.NORMAL,
+                message="controller stream closed",
+            )
+
+            if not completed_normally and not run_task.done():
+                run_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await run_task
+
+    def get_last_stream_result(self) -> RuntimeControllerRunResult | None:
+        return self._last_stream_result
+
     def run(
         self,
         user_input: str,
@@ -679,6 +769,9 @@ async def demo() -> None:
                 "max_iterations": 5,
                 "max_context_messages": 20,
             },
+            "llm": {
+                "fallback_to_mock": True,
+            },
         }
     )
 
@@ -686,26 +779,45 @@ async def demo() -> None:
         app_state=app_state,
     )
 
-    print("Run normal input:")
-    result = await controller.arun("hello PyWork")
+    print("Stream first input:")
 
-    print(result.to_json(indent=2))
-    print("\nController state:")
-    print(controller.to_json(indent=2))
+    async for event in controller.stream(
+        "/tool echo 第一轮消息：PyWork 是一个 Python TUI Agent。"
+    ):
+        print(event.compact_text())
 
-    print("\nRun tool input:")
-    result2 = await controller.arun("/tool echo Hello from RuntimeController.")
+    print("\nStream second input:")
 
-    print(result2.to_json(indent=2))
-    print("\nAppState summary:")
-    print(json.dumps(app_state.get_status_summary(), ensure_ascii=False, indent=2))
+    async for event in controller.stream(
+        "上一轮我说 PyWork 是什么？"
+    ):
+        print(event.compact_text())
 
-    print("\nPause / resume:")
-    controller.pause()
-    print(controller.to_json(indent=2))
+    result = controller.get_last_stream_result()
 
-    controller.resume()
-    print(controller.to_json(indent=2))
+    print("\nFinal result:")
+    if result is not None:
+        print(result.to_json(indent=2))
+
+    print("\nAgentState summary:")
+    print(
+        json.dumps(
+            controller.engine.agent_state.summary(),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
+
+    print("\nAgentState messages:")
+    for index, message in enumerate(controller.engine.agent_state.messages, start=1):
+        role = getattr(message, "role", "")
+
+        if hasattr(role, "value"):
+            role = role.value
+
+        content = str(getattr(message, "content", "") or "")
+        print(f"{index}. {role}: {content[:120]}")
 
 
 def main() -> int:

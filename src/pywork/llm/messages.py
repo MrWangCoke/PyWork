@@ -22,7 +22,7 @@ from pywork.schemas.tool_schema import ToolCall, ToolResult, ToolRiskLevel
 
 class MessageConversionError(Exception):
     """
-    消息格式转换异常。
+    婵炴垵鐗婃导鍛村冀閻撳海纭€閺夌儐鍓氬畷鎻掝嚕閸屾氨鍩楅柕?
     """
 
     pass
@@ -30,12 +30,12 @@ class MessageConversionError(Exception):
 
 def get_attr_or_key(value: Any, name: str, default: Any = None) -> Any:
     """
-    同时兼容 dict 和 SDK 返回对象。
+    闁告艾鏈鍌炲礂閻撳寒鍟?dict 闁?SDK 閺夆晜鏌ㄥú鏍偓鐢殿攰閽栧嫰濡?
 
-    例如 OpenAI SDK 可能返回对象：
+    濞撴艾顑呴々?OpenAI SDK 闁告瑯鍨甸崗妯绘交閺傛寧绀€閻庣數顢婇挅鍕晬?
         tool_call.function.name
 
-    也可能被我们转换成 dict：
+    濞戞梻鍠庤ぐ鏌ユ嚄閸婄噥娼堕柟瀛樺灣濠婃垶娼浣稿簥闁?dict闁?
         tool_call["function"]["name"]
     """
     if value is None:
@@ -76,9 +76,28 @@ def safe_json_loads(value: str) -> Any:
         }
 
 
+def normalize_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content
+
+    return str(content)
+
+
+def ensure_openai_message_content(message: dict[str, Any]) -> dict[str, Any]:
+    if "content" not in message or message["content"] is None:
+        message["content"] = ""
+    else:
+        message["content"] = normalize_message_content(message["content"])
+
+    return message
+
+
 def tool_call_to_openai(tool_call: ToolCall) -> dict[str, Any]:
     """
-    PyWork ToolCall -> OpenAI tool_call 格式。
+    PyWork ToolCall -> OpenAI tool_call 闁哄秶鍘х槐锟犲Υ?
     """
     return {
         "id": tool_call.call_id,
@@ -92,9 +111,9 @@ def tool_call_to_openai(tool_call: ToolCall) -> dict[str, Any]:
 
 def openai_tool_call_to_tool_call(raw_tool_call: Any) -> ToolCall:
     """
-    OpenAI tool_call -> PyWork ToolCall。
+    OpenAI tool_call -> PyWork ToolCall闁?
 
-    兼容 dict 和 SDK object。
+    闁稿繒鍘ч?dict 闁?SDK object闁?
     """
     call_id = str(
         get_attr_or_key(
@@ -148,13 +167,8 @@ def openai_tool_call_to_tool_call(raw_tool_call: Any) -> ToolCall:
     )
 
 
-def tool_definition_to_openai(tool_definition: dict[str, Any]) -> dict[str, Any]:
-    """
-    PyWork tool definition -> OpenAI tool schema。
 
-    输入来自：
-        BaseTool.get_definition()
-    """
+def tool_definition_to_openai(tool_definition: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
@@ -182,35 +196,38 @@ def tool_definitions_to_openai(
 
 
 def message_to_openai(message: AnyMessage) -> dict[str, Any] | None:
-    """
-    PyWork Message -> OpenAI message。
-
-    注意：
-    ErrorMessage 不直接发给模型，默认转成 system 提示。
-    """
+    """Convert a PyWork message into an OpenAI-compatible message."""
     role = role_value(message)
 
     if role == "system":
-        return {
-            "role": "system",
-            "content": message.content,
-        }
+        return ensure_openai_message_content(
+            {
+                "role": "system",
+                "content": normalize_message_content(
+                    getattr(message, "content", "")
+                ),
+            }
+        )
 
     if role == "user":
-        return {
-            "role": "user",
-            "content": message.content,
-        }
+        return ensure_openai_message_content(
+            {
+                "role": "user",
+                "content": normalize_message_content(
+                    getattr(message, "content", "")
+                ),
+            }
+        )
 
     if role == "assistant":
-        assistant = message
-
         payload: dict[str, Any] = {
             "role": "assistant",
-            "content": assistant.content or None,
+            "content": normalize_message_content(
+                getattr(message, "content", "")
+            ),
         }
 
-        tool_calls = getattr(assistant, "tool_calls", [])
+        tool_calls = getattr(message, "tool_calls", None)
 
         if tool_calls:
             payload["tool_calls"] = [
@@ -218,46 +235,49 @@ def message_to_openai(message: AnyMessage) -> dict[str, Any] | None:
                 for call in tool_calls
             ]
 
-        return payload
+        return ensure_openai_message_content(payload)
 
     if role == "tool":
-        tool_message = message
-
-        return {
-            "role": "tool",
-            "tool_call_id": getattr(tool_message, "tool_call_id", ""),
-            "content": tool_message.content,
-        }
+        return ensure_openai_message_content(
+            {
+                "role": "tool",
+                "tool_call_id": getattr(message, "tool_call_id", ""),
+                "content": normalize_message_content(
+                    getattr(message, "content", "")
+                ),
+            }
+        )
 
     if role == "error":
-        return {
-            "role": "system",
-            "content": f"Runtime error: {message.content}",
-        }
+        return ensure_openai_message_content(
+            {
+                "role": "system",
+                "content": "Runtime error: "
+                + normalize_message_content(getattr(message, "content", "")),
+            }
+        )
 
     return None
 
 
 def messages_to_openai(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    """
-    PyWork messages -> OpenAI/OpenAI-compatible messages。
-    """
     converted: list[dict[str, Any]] = []
 
     for message in messages:
         item = message_to_openai(message)
 
         if item is not None:
-            converted.append(item)
+            converted.append(
+                ensure_openai_message_content(item)
+            )
 
     return converted
 
-
 def openai_message_to_pywork(raw_message: Any) -> AnyMessage:
     """
-    OpenAI message -> PyWork Message。
+    OpenAI message -> PyWork Message闁?
 
-    兼容 dict 和 SDK object。
+    闁稿繒鍘ч?dict 闁?SDK object闁?
     """
     role = str(
         get_attr_or_key(
@@ -359,7 +379,7 @@ def openai_messages_to_pywork(raw_messages: Iterable[Any]) -> list[AnyMessage]:
 
 def tool_call_to_anthropic_block(tool_call: ToolCall) -> dict[str, Any]:
     """
-    PyWork ToolCall -> Anthropic tool_use block。
+    PyWork ToolCall -> Anthropic tool_use block闁?
     """
     return {
         "type": "tool_use",
@@ -371,7 +391,7 @@ def tool_call_to_anthropic_block(tool_call: ToolCall) -> dict[str, Any]:
 
 def tool_definition_to_anthropic(tool_definition: dict[str, Any]) -> dict[str, Any]:
     """
-    PyWork tool definition -> Anthropic tool schema。
+    PyWork tool definition -> Anthropic tool schema闁?
     """
     return {
         "name": tool_definition["name"],
@@ -398,7 +418,7 @@ def tool_definitions_to_anthropic(
 
 def messages_to_anthropic_system(messages: list[AnyMessage]) -> str | None:
     """
-    Anthropic Messages API 的 system 是单独字段，不在 messages 数组里。
+    Anthropic Messages API 闁?system 闁哄嫷鍨板畷鐔兼偑椤掆偓閻⊙冣枔绾板绀夊☉鎾崇Т濠€?messages 闁轰焦澹嗙划宥夋煂鐏炵儵鍋?
     """
     system_parts = [
         message.content
@@ -414,10 +434,10 @@ def messages_to_anthropic_system(messages: list[AnyMessage]) -> str | None:
 
 def message_to_anthropic(message: AnyMessage) -> dict[str, Any] | None:
     """
-    PyWork Message -> Anthropic message。
+    PyWork Message -> Anthropic message闁?
 
-    Anthropic 只接受 user / assistant 两类 message。
-    tool_result 要放在 user message content block 里。
+    Anthropic 闁告瑯浜濈敮鎾矗?user / assistant 濞戞挶鍊楃悮?message闁?
+    tool_result 閻熸洑鐒﹂弬渚€宕?user message content block 闂佹彃琚埀?
     """
     role = role_value(message)
 
@@ -507,7 +527,7 @@ def messages_to_anthropic_payload(
     tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
-    PyWork messages -> Anthropic request payload。
+    PyWork messages -> Anthropic request payload闁?
     """
     payload: dict[str, Any] = {
         "messages": messages_to_anthropic(messages),
@@ -589,9 +609,9 @@ def anthropic_tool_use_block_to_tool_call(block: Any) -> ToolCall:
 
 def anthropic_message_to_pywork(raw_message: Any) -> AssistantMessage:
     """
-    Anthropic response message -> PyWork AssistantMessage。
+    Anthropic response message -> PyWork AssistantMessage闁?
 
-    Anthropic assistant response content 是 blocks：
+    Anthropic assistant response content 闁?blocks闁?
     - text
     - tool_use
     """
@@ -633,7 +653,7 @@ def to_provider_messages(
     provider_format: str,
 ) -> Any:
     """
-    统一入口：PyWork messages -> provider messages。
+    缂備胶鍠嶇粩鎾礂閵夈儱缍撻柨娑欑搷yWork messages -> provider messages闁?
 
     provider_format:
     - openai
@@ -657,7 +677,7 @@ def from_provider_message(
     provider_format: str,
 ) -> AnyMessage:
     """
-    统一入口：provider message -> PyWork message。
+    缂備胶鍠嶇粩鎾礂閵夈儱缍撻柨娑欘劒rovider message -> PyWork message闁?
     """
     normalized = provider_format.strip().lower()
 
@@ -677,7 +697,7 @@ def main() -> int:
     from pywork.schemas.tool_schema import create_tool_call
 
     system = create_system_message("You are PyWork, a coding agent.")
-    user = create_user_message("请调用 echo 工具。")
+    user = create_user_message("Please call the echo tool.")
 
     call = create_tool_call(
         tool_name="echo",
@@ -687,7 +707,7 @@ def main() -> int:
     )
 
     assistant = create_assistant_message(
-        "我将调用 echo 工具。",
+        "I will call the echo tool.",
         tool_calls=[call],
     )
 

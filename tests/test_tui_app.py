@@ -139,3 +139,22 @@ async def test_pywork_app_reset_tokens_slash_command() -> None:
 
         assert status_bar.total_tokens == 0
         assert str(app.query_one("#prompt-input").text) == ""
+
+
+@pytest.mark.asyncio
+async def test_pywork_app_does_not_intercept_tool_slash_command() -> None:
+    app = PyWorkApp()
+
+    async with app.run_test(size=(120, 30)):
+        assert app.handle_slash_command("/tool echo hello") is False
+
+
+@pytest.mark.asyncio
+async def test_pywork_app_status_bar_uses_qwen_runtime_model() -> None:
+    app = PyWorkApp()
+
+    async with app.run_test(size=(120, 30)):
+        status_bar = app.query_one("#status-bar")
+
+        assert status_bar.model == "qwen3.6-flash/qwen"
+        assert status_bar.provider == "qwen"

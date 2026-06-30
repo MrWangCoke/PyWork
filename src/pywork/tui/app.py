@@ -4,17 +4,22 @@ import importlib.util
 import platform
 import shutil
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 
+from pywork.runtime.controller import RuntimeController
+from pywork.runtime.events import RuntimeEvent
+from pywork.state.app_state import create_app_state
 from pywork.tui.components.chat_panel import ChatPanel
 from pywork.tui.components.input_box import InputBox, InputSubmitted
 from pywork.tui.components.status_bar import StatusBar
+from pywork.tui.components.tool_log import ToolLog
 
 
 @dataclass(frozen=True)
@@ -50,13 +55,8 @@ def get_config_value(
     return current
 
 
-def estimate_tokens(text: str) -> int:
-    """
-    临时 token 估算。
 
-    真正的 Token 统计后面接 LLM Provider 时再换成真实 usage。
-    这里先用简单估算：中文/英文混合场景下，大约 2 个字符算 1 token。
-    """
+def estimate_tokens(text: str) -> int:
     text = text.strip()
 
     if not text:
@@ -64,47 +64,48 @@ def estimate_tokens(text: str) -> int:
 
     return max(1, len(text) // 2)
 
+
 def get_builtin_slash_commands() -> list[SlashCommand]:
     return [
         SlashCommand(
             name="/help",
-            description="列出当前可用命令。",
+            description="List available commands.",
             usage="/help",
             aliases=("/?", "/h"),
         ),
         SlashCommand(
             name="/clear",
-            description="清空当前聊天消息。",
+            description="Clear chat messages and tool log.",
             usage="/clear",
             aliases=("/cls",),
         ),
         SlashCommand(
             name="/status",
-            description="显示当前模型、权限模式、Token 用量等状态。",
+            description="Show model, permission mode, token usage, and state.",
             usage="/status",
             aliases=("/info",),
         ),
         SlashCommand(
             name="/doctor",
-            description="打印环境诊断信息，包括 Python、OS、依赖状态。",
+            description="Print a lightweight environment diagnostic report.",
             usage="/doctor",
             aliases=("/diag",),
         ),
         SlashCommand(
             name="/tokens",
-            description="显示当前 Token 用量。",
+            description="Show current token usage.",
             usage="/tokens",
             aliases=(),
         ),
         SlashCommand(
             name="/reset-token",
-            description="重置 Token 用量。",
+            description="Reset token usage.",
             usage="/reset-token",
             aliases=("/reset-tokens", "/tokens reset"),
         ),
         SlashCommand(
             name="/exit",
-            description="退出 PyWork TUI。",
+            description="Exit PyWork TUI.",
             usage="/exit",
             aliases=("/quit",),
         ),
@@ -128,21 +129,15 @@ def render_dependency_status(
     available: bool,
     required: bool = True,
 ) -> str:
-    icon = "✅" if available else ("❌" if required else "⚠️")
+    icon = "OK" if available else ("MISSING" if required else "OPTIONAL")
     kind = "required" if required else "optional"
     status = "ok" if available else "missing"
 
-    return f"- {icon} `{name}` — {status} ({kind})"
+    return f"- {icon} `{name}` - {status} ({kind})"
 
 
 def render_tui_doctor_report() -> str:
-    """
-    TUI 内部 doctor 报告。
-
-    注意：
-    CLI 版 doctor 已经在 entrypoints/doctor.py。
-    这里是给 /doctor 命令显示用的轻量版。
-    """
+    """Return a lightweight doctor report for the TUI /doctor command."""
     python_version = platform.python_version()
     python_executable = sys.executable
     os_name = platform.system()
@@ -277,9 +272,9 @@ def render_tui_doctor_report() -> str:
     )
 
     if not missing_required_packages and not missing_required_commands:
-        lines.append("- ✅ Required environment looks OK.")
+        lines.append("- OK Required environment looks OK.")
     else:
-        lines.append("- ❌ Required environment has missing items.")
+        lines.append("- MISSING Required environment has missing items.")
 
         if missing_required_packages:
             lines.append(
@@ -297,17 +292,7 @@ def render_tui_doctor_report() -> str:
 
 
 class PyWorkApp(App[None]):
-    """
-    PyWork 主 TUI 应用。
-
-    当前阶段目标：
-    1. 启动 Textual App
-    2. 渲染消息区
-    3. 渲染输入区
-    4. 渲染状态栏
-    5. 输入后把用户消息显示到 ChatPanel
-    6. Runtime 尚未接入时，返回占位助手消息
-    """
+    """Main Textual application for PyWork."""
 
     CSS = """
     Screen {
@@ -318,16 +303,29 @@ class PyWorkApp(App[None]):
         height: 1fr;
     }
 
-    ChatPanel {
+    #main-area {
         height: 1fr;
     }
 
-    InputBox {
+    #chat-panel {
+        width: 2fr;
+        height: 100%;
+        border: round $accent;
+    }
+
+    #tool-log {
+        width: 1fr;
+        height: 100%;
+        border: round $surface;
+    }
+
+    #input-box {
         height: 10;
     }
 
-    StatusBar {
+    #status-bar {
         dock: bottom;
+        height: 2;
     }
     """
 
@@ -351,15 +349,43 @@ class PyWorkApp(App[None]):
         workspace = Path(workspace_path).expanduser().resolve()
         root = Path(project_root).expanduser().resolve() if project_root else workspace
 
+        self.workspace = workspace
+        self.config = config or {}
+
         self.context = PyWorkTUIContext(
             workspace_path=str(workspace),
             project_root=str(root),
-            config=config or {},
+            config=self.config,
         )
+
+        self.runtime_controller: RuntimeController | None = None
+        self.runtime_busy = False
+
+        self.chat_panel: ChatPanel | None = None
+        self.input_box: InputBox | None = None
+        self.status_bar: StatusBar | None = None
+        self.tool_log: ToolLog | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-layout"):
-            yield ChatPanel(id="chat-panel")
+            with Horizontal(id="main-area"):
+                yield ChatPanel(id="chat-panel")
+                yield ToolLog(id="tool-log")
+
+            yield InputBox(id="input-box")
+
+        yield StatusBar(
+            id="status-bar",
+            model=self.get_model_name(),
+            provider=self.get_provider_name(),
+            permission_mode=self.get_permission_mode(),
+        )
+    def compose(self) -> ComposeResult:
+        with Vertical(id="main-layout"):
+            with Horizontal(id="main-area"):
+                yield ChatPanel(id="chat-panel")
+                yield ToolLog(id="tool-log")
+
             yield InputBox(id="input-box")
 
         yield StatusBar(
@@ -372,66 +398,152 @@ class PyWorkApp(App[None]):
     def on_mount(self) -> None:
         self.title = "PyWork"
 
-        chat_panel = self.get_chat_panel()
-        status_bar = self.get_status_bar()
+        self.chat_panel = self.query_one("#chat-panel", ChatPanel)
+        self.input_box = self.query_one("#input-box", InputBox)
+        self.status_bar = self.query_one("#status-bar", StatusBar)
+        self.tool_log = self.query_one("#tool-log", ToolLog)
 
-        chat_panel.append_system_message(
-            "PyWork TUI started.\n\n"
-            f"- Workspace: `{self.context.workspace_path}`\n"
-            f"- Project Root: `{self.context.project_root}`\n\n"
-            "Runtime is not connected yet. 当前阶段先测试 TUI 输入和消息渲染。"
+        self.runtime_controller = self.create_runtime_controller()
+
+        if self.status_bar is not None:
+            self.status_bar.set_model(
+                self.get_configured_model_label(),
+                provider=self.get_configured_provider_name(),
+            )
+
+        self.chat_panel.append_system_message(
+            "PyWork TUI ready. RuntimeController.stream() is connected."
         )
 
-        status_bar.set_idle("ready")
-        self.get_input_box().focus_input()
+        self.tool_log.append_status("RuntimeController connected.")
+        self.status_bar.set_idle("ready")
 
+        with suppress(Exception):
+            self.input_box.focus_input()
+
+    def get_runtime_config(self) -> dict[str, Any]:
+        runtime_config = dict(self.config)
+        runtime_config["permissions"] = {
+            **runtime_config.get("permissions", {}),
+            "mode": "default",
+        }
+        runtime_config["agent"] = {
+            **runtime_config.get("agent", {}),
+            "max_iterations": 1000,
+            "max_context_messages": 5000,
+        }
+        runtime_config["llm"] = {
+            "default_provider": "qwen",
+            "fallback_to_mock": False,
+            "providers": {
+                "qwen": {
+                    "provider": "qwen",
+                    "api_format": "openai_compatible",
+                    "model": "qwen3.6-flash",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                    "temperature": 0.2,
+                    "max_tokens": 2048,
+                }
+            },
+        }
+
+        return runtime_config
+
+    def create_runtime_controller(self) -> RuntimeController:
+        workspace_path = self.context.workspace_path
+        project_root = self.context.project_root
+        runtime_config = self.get_runtime_config()
+
+        try:
+            app_state = create_app_state(
+                workspace_path=workspace_path,
+                project_root=project_root,
+                config=runtime_config,
+            )
+        except TypeError:
+            app_state = create_app_state(
+                config=runtime_config,
+            )
+
+        return RuntimeController(
+            app_state=app_state,
+        )
 
     def get_chat_panel(self) -> ChatPanel:
+        if self.chat_panel is not None:
+            return self.chat_panel
+
         return self.query_one("#chat-panel", ChatPanel)
 
     def get_input_box(self) -> InputBox:
+        if self.input_box is not None:
+            return self.input_box
+
         return self.query_one("#input-box", InputBox)
 
     def get_status_bar(self) -> StatusBar:
+        if self.status_bar is not None:
+            return self.status_bar
+
         return self.query_one("#status-bar", StatusBar)
 
+    def get_tool_log(self) -> ToolLog:
+        if self.tool_log is not None:
+            return self.tool_log
+
+        return self.query_one("#tool-log", ToolLog)
+
     def get_model_name(self) -> str:
-        return str(
-            get_config_value(
-                self.context.config,
-                "default.model",
-                "deepseek-v4-flash",
-            )
-        )
+        return self.get_configured_model_label()
 
     def get_provider_name(self) -> str:
-        return str(
-            get_config_value(
-                self.context.config,
-                "default.provider",
-                "deepseek",
-            )
-        )
+        return self.get_configured_provider_name()
+
+    def get_configured_provider_name(self) -> str:
+        llm_config = self.get_runtime_config().get("llm", {})
+
+        if isinstance(llm_config, dict):
+            default_provider = llm_config.get("default_provider")
+
+            if default_provider:
+                return str(default_provider)
+
+        return "mock"
+
+    def get_configured_model_label(self) -> str:
+        llm_config = self.get_runtime_config().get("llm", {})
+
+        if isinstance(llm_config, dict):
+            default_provider = llm_config.get("default_provider")
+            providers = llm_config.get("providers", {})
+
+            if default_provider and isinstance(providers, dict):
+                provider_config = providers.get(default_provider, {})
+
+                if isinstance(provider_config, dict):
+                    model = provider_config.get("model")
+
+                    if model:
+                        return f"{model}/{default_provider}"
+
+        return "mock/local"
 
     def get_permission_mode(self) -> str:
         return str(
             get_config_value(
-                self.context.config,
+                self.get_runtime_config(),
                 "permissions.mode",
-                get_config_value(
-                    self.context.config,
-                    "app.permission_mode",
-                    "default",
-                ),
+                "default",
             )
         )
-    
+
     def get_slash_commands(self) -> list[SlashCommand]:
         return get_builtin_slash_commands()
 
     def render_help_text(self) -> str:
         lines: list[str] = [
-            "PyWork 可用命令：",
+            "PyWork available commands:",
             "",
         ]
 
@@ -439,35 +551,34 @@ class PyWorkApp(App[None]):
             aliases = ""
 
             if command.aliases:
-                aliases = "，别名：" + " / ".join(command.aliases)
+                aliases = ", aliases: " + " / ".join(command.aliases)
 
             lines.append(
-                f"- `{command.usage}` — {command.description}{aliases}"
+                f"- `{command.usage}` - {command.description}{aliases}"
             )
 
         lines.extend(
             [
                 "",
-                "快捷键：",
+                "Shortcuts:",
                 "",
-                "- `Ctrl+Enter` / `Ctrl+J`：提交输入",
-                "- `Esc`：清空输入框",
-                "- `Ctrl+L`：清空聊天",
-                "- `F5`：重置 Token",
-                "- `F6`：显示状态",
-                "- `q`：退出",
+                "- `Ctrl+Enter` / `Ctrl+J`: submit input",
+                "- `Esc`: clear input",
+                "- `Ctrl+L`: clear chat and tool log",
+                "- `Ctrl+R`: reset tokens",
+                "- `Ctrl+S`: show status",
+                "- `q`: quit",
             ]
         )
 
         return "\n".join(lines)
 
     def handle_slash_command(self, user_text: str) -> bool:
-        """
-        处理 TUI 内部 /command。
+        command_name = user_text.strip().split(maxsplit=1)[0].lower()
 
-        返回 True：说明已经处理，不再进入普通聊天流程。
-        返回 False：说明不是命令，继续作为普通用户输入。
-        """
+        if command_name == "/tool":
+            return False
+
         command_text = normalize_slash_command(user_text)
 
         if not command_text.startswith("/"):
@@ -486,7 +597,7 @@ class PyWorkApp(App[None]):
         if command_text in {"/status", "/info"}:
             self.action_show_status()
             return True
-        
+
         if command_text in {"/doctor", "/diag"}:
             self.action_show_doctor()
             return True
@@ -504,72 +615,183 @@ class PyWorkApp(App[None]):
             return True
 
         self.get_chat_panel().append_error_message(
-            f"未知命令：`{user_text}`\n\n输入 `/help` 查看可用命令。"
+            f"Unknown command: `{user_text}`\n\nType `/help` to see available commands."
         )
         self.get_status_bar().set_error("unknown command")
         self.get_input_box().focus_input()
         return True
 
+    def get_submitted_text_from_event(self, event: Any) -> str:
+        for attr in ("text", "value", "content", "message"):
+            value = getattr(event, attr, None)
+
+            if isinstance(value, str):
+                return value.strip()
+
+            text = getattr(value, "text", None)
+            if isinstance(text, str):
+                return text.strip()
+
+        return ""
+
     def on_input_submitted(self, message: InputSubmitted) -> None:
-        """
-        InputBox 提交后进入这里。
-
-        当前阶段：
-        - 显示用户消息
-        - 更新 token 估算
-        - 显示占位助手消息
-
-        后面接 runtime/engine.py 后：
-        - 这里会调用 Runtime
-        - Runtime 再调用 LLM / Tools / Agent
-        """
         message.stop()
 
-        user_text = message.value.text
+        user_text = self.get_submitted_text_from_event(message)
 
         if not user_text:
             return
 
-        if self.handle_slash_command(user_text):
+        if self.runtime_busy:
+            if self.chat_panel is not None:
+                self.chat_panel.append_system_message(
+                    "A runtime task is still running. Please wait for it to finish."
+                )
             return
+
+        if user_text.startswith("/"):
+            handled = self.handle_slash_command(user_text)
+
+            if handled:
+                return
 
         chat_panel = self.get_chat_panel()
         status_bar = self.get_status_bar()
+        tool_log = self.get_tool_log()
 
         chat_panel.append_user_message(user_text)
+        status_bar.add_token_usage(input_tokens=estimate_tokens(user_text))
+        tool_log.append_status(f"user submitted: {user_text}")
 
-        input_tokens = estimate_tokens(user_text)
-        status_bar.add_token_usage(input_tokens=input_tokens)
-
-        status_bar.set_thinking("runtime not connected")
-
-        assistant_text = (
-            "收到你的输入：\n\n"
-            f"> {user_text}\n\n"
-            "当前 TUI 已经能接收输入并渲染消息。\n\n"
-            "下一阶段接入 `runtime/engine.py` 后，这里会替换成真实模型回复。"
+        self.run_worker(
+            self.run_runtime_stream(user_text),
+            name="runtime-stream",
+            group="runtime",
+            exclusive=True,
         )
 
-        chat_panel.append_assistant_message(assistant_text)
+    async def run_runtime_stream(self, user_text: str) -> None:
+        if self.runtime_controller is None:
+            if self.chat_panel is not None:
+                self.chat_panel.append_error_message("RuntimeController is not initialized.")
+            return
 
-        output_tokens = estimate_tokens(assistant_text)
-        status_bar.add_token_usage(output_tokens=output_tokens)
+        self.runtime_busy = True
 
-        status_bar.set_idle("ready")
-        self.get_input_box().focus_input()
+        if self.status_bar is not None:
+            self.status_bar.set_thinking()
+
+        if self.tool_log is not None:
+            self.tool_log.append_status("runtime stream started")
+
+        try:
+            async for event in self.runtime_controller.stream(user_text):
+                self.handle_runtime_event(event)
+
+            result = self.runtime_controller.get_last_stream_result()
+
+            if result is not None:
+                if result.success:
+                    if result.output and self.chat_panel is not None:
+                        self.chat_panel.append_assistant_message(result.output)
+
+                    if result.output and self.status_bar is not None:
+                        self.status_bar.add_token_usage(
+                            output_tokens=estimate_tokens(result.output)
+                        )
+
+                    if self.status_bar is not None:
+                        self.status_bar.set_idle()
+
+                else:
+                    error_text = result.error or "RuntimeController failed."
+
+                    if self.chat_panel is not None:
+                        self.chat_panel.append_error_message(error_text)
+
+                    if self.status_bar is not None:
+                        self.status_bar.set_error(error_text)
+
+            else:
+                if self.status_bar is not None:
+                    self.status_bar.set_idle()
+
+        except Exception as exc:
+            error_text = str(exc)
+
+            if self.tool_log is not None:
+                self.tool_log.append_error(error_text)
+
+            if self.chat_panel is not None:
+                self.chat_panel.append_error_message(error_text)
+
+            if self.status_bar is not None:
+                self.status_bar.set_error(error_text)
+
+        finally:
+            self.runtime_busy = False
+
+            if self.tool_log is not None:
+                self.tool_log.append_status("runtime stream finished")
+
+            if self.input_box is not None:
+                with suppress(Exception):
+                    self.input_box.focus_input()
+
+    def handle_runtime_event(self, event: RuntimeEvent) -> None:
+        if self.tool_log is not None:
+            self.tool_log.append_runtime_event(event)
+
+        event_type = getattr(event, "event_type", None)
+        event_type_value = getattr(event_type, "value", str(event_type))
+
+        if self.status_bar is None:
+            return
+
+        if event_type_value == "status":
+            status = str(getattr(event, "status", "") or "")
+
+            if status == "running_tool":
+                metadata = getattr(event, "metadata", {}) or {}
+                tool_name = metadata.get("tool_name", "tool")
+                self.status_bar.set_running_tool(tool_name)
+
+            elif status in {"thinking", "llm_response"}:
+                self.status_bar.set_thinking()
+
+            elif status in {"finished", "tool_finished"}:
+                self.status_bar.set_idle()
+
+        elif event_type_value == "error":
+            content = str(
+                getattr(event, "content", "")
+                or getattr(event, "message", "")
+                or "runtime error"
+            )
+            self.status_bar.set_error(content)
 
     def action_clear_chat(self) -> None:
         chat_panel = self.get_chat_panel()
         chat_panel.clear_messages()
         chat_panel.append_system_message("Chat cleared.")
+        self.get_tool_log().clear()
         self.get_status_bar().set_idle("chat cleared")
         self.get_input_box().focus_input()
-
     def action_reset_tokens(self) -> None:
         status_bar = self.get_status_bar()
         status_bar.reset_token_usage()
+        self.get_chat_panel().append_system_message("Token usage reset.")
         status_bar.set_idle("tokens reset")
         self.get_input_box().focus_input()
+
+    def on_key(self, event: Any) -> None:
+        key = str(getattr(event, "key", "") or "")
+
+        if key.lower() == "ctrl+r":
+            self.action_reset_tokens()
+
+            if hasattr(event, "stop"):
+                event.stop()
 
     def action_show_tokens(self) -> None:
         status_bar = self.get_status_bar()
