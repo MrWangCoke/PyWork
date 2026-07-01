@@ -208,6 +208,7 @@ class StatusBar(Widget):
             f" | dir {self.workspace_path}"
             f" | model {model_label}"
             f" | mode {self.permission_mode} [Tab]"
+            f" | Ctrl+P commands"
         )
 
     def render_left(self) -> str:
@@ -221,6 +222,7 @@ class StatusBar(Widget):
         return (
             f"dir: {self.workspace_path} "
             f"| mode: {self.permission_mode} [Tab] "
+            f"| Ctrl+P commands "
             f"| {self.state}: {self.message}"
         )
 
@@ -244,7 +246,6 @@ class StatusBarDemoApp(App[None]):
 
     BINDINGS = [
         Binding("q", "quit", "Quit", priority=True),
-        Binding("ctrl+c", "quit", "Quit", priority=True),
 
         Binding("1", "idle", "Idle", priority=True),
         Binding("2", "thinking", "Thinking", priority=True),

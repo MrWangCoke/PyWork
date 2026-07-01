@@ -78,6 +78,15 @@ def test_approval_dialog_does_not_expose_always_allow() -> None:
     assert "always_allow" not in actions
 
 
+def test_approval_dialog_enter_confirms_allow() -> None:
+    decision = make_file_write_decision()
+    dialog = ApprovalDialog(decision)
+
+    bindings = {binding[0]: binding[1] for binding in dialog.BINDINGS}
+
+    assert bindings["enter"] == "allow"
+
+
 def test_normal_tool_dialog_uses_allow_deny_labels() -> None:
     decision = make_bash_decision()
 

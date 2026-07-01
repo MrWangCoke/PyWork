@@ -12,8 +12,7 @@ from textual.widgets import Log, Static, TextArea
 
 
 SUBMIT_KEYS = {
-    "ctrl+enter",
-    "ctrl+j",
+    "enter",
 }
 
 
@@ -50,7 +49,7 @@ class SubmitRequested(Message):
     """
     SubmitTextArea 内部事件。
 
-    TextArea 捕获 Ctrl+Enter / Ctrl+J 后，
+    TextArea 捕获 Enter 后，
     先发给 InputBox，再由 InputBox 统一处理提交。
     """
 
@@ -75,15 +74,13 @@ class SubmitTextArea(TextArea):
     支持快捷键的多行输入框。
 
     默认行为：
-    - Enter：换行
-    - Ctrl+Enter：提交
-    - Ctrl+J：提交备用键
+    - Enter：提交
     - Esc：清空
     """
 
     DEFAULT_CSS = """
     SubmitTextArea {
-        height: 5;
+        height: 7;
         min-height: 3;
         max-height: 10;
         border: round $accent;
@@ -124,7 +121,7 @@ class InputBox(Widget):
 
     DEFAULT_CSS = """
     InputBox {
-        height: 10;
+        height: 12;
         border-top: solid $primary;
         padding: 1;
     }
@@ -163,7 +160,7 @@ class InputBox(Widget):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(
-                "Enter 换行 · Ctrl+Enter / Ctrl+J 提交 · Esc 清空",
+                "Enter 提交 · Esc 清空",
                 id="input-help",
             )
             yield SubmitTextArea(
@@ -261,20 +258,19 @@ class InputBoxDemoApp(App[None]):
     }
 
     InputBox {
-        height: 10;
+        height: 12;
     }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("ctrl+c", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self.demo_log_text = (
             "InputBox demo started.\n\n"
-            "输入内容后按 Ctrl+Enter 或 Ctrl+J 提交。\n"
+            "输入内容后按 Enter 提交。\n"
             "按 q 退出。"
         )
 

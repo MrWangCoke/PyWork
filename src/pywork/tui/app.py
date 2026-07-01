@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Input, Label, ListItem, ListView, Static
 
 from pywork.runtime.controller import RuntimeController
 from pywork.runtime.events import RuntimeEvent
@@ -128,6 +131,171 @@ def get_builtin_slash_commands() -> list[SlashCommand]:
 
 def normalize_slash_command(text: str) -> str:
     return " ".join(text.strip().lower().split())
+
+
+class CommandsDialog(ModalScreen[str | None]):
+    BINDINGS = [
+        Binding("escape", "close", "Close", priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    CommandsDialog {
+        align: center middle;
+    }
+
+    CommandsDialog > Container {
+        width: 78%;
+        max-width: 96;
+        height: auto;
+        max-height: 82%;
+        border: round #666666;
+        background: #181818;
+        padding: 1 2;
+    }
+
+    CommandsDialog .dialog-title {
+        height: 1;
+        color: #eeeeee;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    #command-search {
+        margin-bottom: 1;
+    }
+
+    #command-list {
+        height: auto;
+        min-height: 8;
+        max-height: 24;
+    }
+
+    CommandsDialog .dialog-footer {
+        height: 1;
+        color: #999999;
+        margin-top: 1;
+    }
+    """
+
+    def __init__(self, commands: list[SlashCommand]) -> None:
+        super().__init__()
+        self.commands = commands
+        self.filtered_commands = list(commands)
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Commands", classes="dialog-title")
+            yield Input(
+                placeholder="Search commands",
+                id="command-search",
+            )
+            yield ListView(id="command-list")
+            yield Static(
+                "Type to filter · Up/Down move · Enter run · Esc close",
+                classes="dialog-footer",
+            )
+
+    async def on_mount(self) -> None:
+        await self.refresh_commands("")
+        self.query_one("#command-search", Input).focus()
+
+    def command_matches(self, command: SlashCommand, query: str) -> bool:
+        if not query:
+            return True
+
+        haystack = " ".join(
+            [
+                command.name,
+                command.usage,
+                command.description,
+                " ".join(command.aliases),
+            ]
+        ).lower()
+
+        return query.lower() in haystack
+
+    def render_command_row(self, command: SlashCommand) -> str:
+        aliases = ""
+
+        if command.aliases:
+            aliases = "  " + ", ".join(command.aliases)
+
+        return f"{command.usage:<16} {command.description}{aliases}"
+
+    async def refresh_commands(self, query: str) -> None:
+        self.filtered_commands = [
+            command
+            for command in self.commands
+            if self.command_matches(command, query.strip())
+        ]
+
+        list_view = self.query_one("#command-list", ListView)
+        await list_view.clear()
+
+        if not self.filtered_commands:
+            await list_view.append(
+                ListItem(Label("No commands found"), disabled=True)
+            )
+            list_view.index = None
+            return
+
+        for command in self.filtered_commands:
+            await list_view.append(
+                ListItem(Label(self.render_command_row(command)))
+            )
+
+        list_view.index = 0
+
+    @on(Input.Changed, "#command-search")
+    async def on_search_changed(self, event: Input.Changed) -> None:
+        await self.refresh_commands(event.value)
+
+    @on(ListView.Selected, "#command-list")
+    def on_command_selected(self, event: ListView.Selected) -> None:
+        self.execute_selected()
+
+    def execute_selected(self) -> None:
+        if not self.filtered_commands:
+            return
+
+        list_view = self.query_one("#command-list", ListView)
+        index = list_view.index
+
+        if index is None:
+            index = 0
+
+        if index < 0 or index >= len(self.filtered_commands):
+            return
+
+        self.dismiss(self.filtered_commands[index].usage)
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key.lower()
+        list_view = self.query_one("#command-list", ListView)
+
+        if key == "enter":
+            event.prevent_default()
+            event.stop()
+            self.execute_selected()
+            return
+
+        if key in {"down", "ctrl+n"} and self.filtered_commands:
+            event.prevent_default()
+            event.stop()
+            current = list_view.index or 0
+            list_view.index = min(current + 1, len(self.filtered_commands) - 1)
+            return
+
+        if key in {"up", "ctrl+p"} and self.filtered_commands:
+            event.prevent_default()
+            event.stop()
+            current = list_view.index or 0
+            list_view.index = max(current - 1, 0)
+            return
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
 
 def is_python_package_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
@@ -334,7 +502,7 @@ class PyWorkApp(App[None]):
     }
 
     #input-box {
-        height: 10;
+        height: 12;
     }
 
     #status-bar {
@@ -344,11 +512,10 @@ class PyWorkApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit", priority=True),
-        Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("ctrl+l", "clear_chat", "Clear Chat", priority=True),
         Binding("ctrl+r", "reset_tokens", "Reset Tokens", priority=True),
         Binding("ctrl+s", "show_status", "Show Status", priority=True),
+        Binding("ctrl+p", "show_commands", "Commands", priority=True),
         Binding("tab", "cycle_permission_mode", "Switch Mode", priority=True),
     ]
 
@@ -610,12 +777,13 @@ class PyWorkApp(App[None]):
                 "",
                 "Shortcuts:",
                 "",
-                "- `Ctrl+Enter` / `Ctrl+J`: submit input",
+                "- `Enter`: submit input / confirm dialog",
+                "- `Ctrl+P`: show commands",
+                "- `Tab`: switch permission mode",
                 "- `Esc`: clear input",
                 "- `Ctrl+L`: clear chat and tool log",
                 "- `Ctrl+R`: reset tokens",
                 "- `Ctrl+S`: show status",
-                "- `q`: quit",
             ]
         )
 
@@ -846,10 +1014,20 @@ class PyWorkApp(App[None]):
 
         self.set_permission_mode(next_mode)
         self.get_status_bar().set_idle(f"mode switched to {next_mode}")
-        self.get_chat_panel().append_system_message(
-            f"Permission mode switched to `{next_mode}`."
-        )
         self.get_input_box().focus_input()
+
+    def action_show_commands(self) -> None:
+        self.push_screen(
+            CommandsDialog(self.get_slash_commands()),
+            self.handle_command_dialog_result,
+        )
+
+    def handle_command_dialog_result(self, command_text: str | None) -> None:
+        if not command_text:
+            self.get_input_box().focus_input()
+            return
+
+        self.handle_slash_command(command_text)
 
     def on_key(self, event: Any) -> None:
         key = str(getattr(event, "key", "") or "")
@@ -862,6 +1040,15 @@ class PyWorkApp(App[None]):
 
         if key.lower() == "tab":
             self.action_cycle_permission_mode()
+
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()
+
+            if hasattr(event, "stop"):
+                event.stop()
+
+        if key.lower() == "ctrl+p":
+            self.action_show_commands()
 
             if hasattr(event, "prevent_default"):
                 event.prevent_default()

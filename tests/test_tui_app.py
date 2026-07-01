@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from textual.events import Key
 
-from pywork.tui.app import PyWorkApp
+from pywork.tui.app import CommandsDialog, PyWorkApp
 
 
 @pytest.mark.asyncio
@@ -50,7 +50,7 @@ async def test_pywork_app_submission_is_visible_and_clears_input() -> None:
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.click("#prompt-input")
         await pilot.press("h", "e", "l", "l", "o")
-        await pilot.press("ctrl+j")
+        await pilot.press("enter")
         await pilot.pause()
 
         screenshot = app.export_screenshot()
@@ -135,7 +135,7 @@ async def test_pywork_app_reset_tokens_slash_command() -> None:
 
         await pilot.click("#prompt-input")
         await pilot.press("/", "r", "e", "s", "e", "t", "-", "t", "o", "k", "e", "n", "s")
-        await pilot.press("ctrl+j")
+        await pilot.press("enter")
         await pilot.pause()
 
         assert status_bar.total_tokens == 0
@@ -162,6 +162,62 @@ async def test_pywork_app_status_bar_uses_qwen_runtime_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pywork_app_ctrl_p_shows_commands_dialog() -> None:
+    app = PyWorkApp()
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+
+        screenshot = app.export_screenshot()
+        status_bar = app.query_one("#status-bar")
+
+        assert "Commands" in screenshot
+        assert "/exit" in screenshot
+        assert "Ctrl+P commands" in status_bar.render_status_line()
+
+
+def test_pywork_app_exit_only_exposed_through_commands() -> None:
+    bindings = {binding.key for binding in PyWorkApp.BINDINGS}
+
+    assert "q" not in bindings
+    assert "ctrl+c" not in bindings
+    assert "ctrl+p" in bindings
+
+
+@pytest.mark.asyncio
+async def test_pywork_app_commands_dialog_searches_exit() -> None:
+    app = PyWorkApp()
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.press("ctrl+p")
+        await pilot.press("e", "x", "i", "t")
+        await pilot.pause()
+
+        screenshot = app.export_screenshot()
+        dialog = app.screen
+
+        assert "/exit" in screenshot
+        assert isinstance(dialog, CommandsDialog)
+        assert [command.name for command in dialog.filtered_commands] == ["/exit"]
+
+
+def test_pywork_app_command_dialog_exit_result_exits() -> None:
+    app = PyWorkApp()
+    exited = False
+
+    def fake_exit(*args, **kwargs) -> None:
+        nonlocal exited
+        exited = True
+
+    app.exit = fake_exit
+
+    app.handle_command_dialog_result("/exit")
+
+    assert exited is True
+
+
+@pytest.mark.asyncio
 async def test_pywork_app_tab_switches_permission_mode() -> None:
     app = PyWorkApp(
         config={
@@ -173,6 +229,8 @@ async def test_pywork_app_tab_switches_permission_mode() -> None:
 
     async with app.run_test(size=(120, 30)) as pilot:
         status_bar = app.query_one("#status-bar")
+        chat_panel = app.query_one("#chat-panel")
+        before_count = len(chat_panel.messages)
 
         await pilot.press("tab")
         await pilot.pause()
@@ -181,3 +239,4 @@ async def test_pywork_app_tab_switches_permission_mode() -> None:
         assert status_bar.permission_mode == "accept_edits"
         assert app.get_runtime_config()["permissions"]["mode"] == "accept_edits"
         assert "[Tab]" in status_bar.render_status_line()
+        assert len(chat_panel.messages) == before_count

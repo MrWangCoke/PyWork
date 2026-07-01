@@ -369,6 +369,7 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
     """
 
     BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
+        ("enter", "allow", "Allow"),
         ("escape", "deny", "Deny"),
         ("a", "allow", "Allow"),
         ("d", "deny", "Deny"),

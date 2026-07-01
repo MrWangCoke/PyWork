@@ -6,14 +6,13 @@ from pywork.tui.components.input_box import InputBoxDemoApp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("submit_key", ["ctrl+j", "ctrl+enter"])
-async def test_input_box_submit_bubbles_to_demo_app(submit_key: str) -> None:
+async def test_input_box_submit_bubbles_to_demo_app() -> None:
     app = InputBoxDemoApp()
 
     async with app.run_test() as pilot:
         await pilot.click("#prompt-input")
         await pilot.press("h", "e", "l", "l", "o")
-        await pilot.press(submit_key)
+        await pilot.press("enter")
         await pilot.pause()
 
         input_area = app.query_one("#prompt-input")
@@ -35,7 +34,7 @@ async def test_input_box_demo_log_scrolls_to_latest_submission() -> None:
         for index in range(12):
             text = f"message-{index}"
             await pilot.press(*text)
-            await pilot.press("ctrl+j")
+            await pilot.press("enter")
 
         await pilot.pause()
 

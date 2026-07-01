@@ -373,7 +373,6 @@ class ChatPanelDemoApp(App[None]):
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("ctrl+c", "quit", "Quit"),
     ]
 
     def compose(self) -> ComposeResult:
