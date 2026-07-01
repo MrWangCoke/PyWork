@@ -1,138 +1,120 @@
 # PyWork
 
-PyWork is a Python TUI coding-agent workspace. It is built around a Textual
-interface, a RuntimeController / RuntimeEngine execution loop, LangGraph-style
-agent orchestration, tool calling, and a permission gate for risky operations.
+语言 / Languages: **中文** | [English](README.en.md)
 
-The project is currently in early development. The core skeleton, TUI demo
-flow, runtime graph, tool registry, file tools, shell tools, approval dialog,
-and test coverage are being built incrementally.
+PyWork 是一个 Python TUI 编程代理工作区，目标是把终端聊天界面、工具调用、权限审批、文件修改预览、Runtime 执行流和 LLM 连接整合到一个可扩展的本地开发助手里。
 
-## Features
+> 当前项目仍处于早期开发阶段。很多模块已经有骨架和测试，但整体行为仍在快速迭代。
 
-- Textual-based TUI with chat panel, input box, status bar, and tool log.
-- RuntimeController and RuntimeEngine for executing user requests.
-- LangGraph-backed AgentGraphRunner for multi-step tool workflows.
-- OpenAI-compatible LLM provider routing.
-- Built-in tools:
-  - `file_read`
-  - `glob`
-  - `grep`
-  - `file_write`
-  - `file_edit`
-  - `bash`
-  - `powershell`
-  - `echo`
-- PermissionGate for file and shell operations.
-- Approval dialog for operations that require user confirmation.
-- File change preview and diff-related utilities.
-- Audit and session override plumbing for permission decisions.
-- Focused tests for runtime, permissions, tools, TUI components, and LLM message
-  conversion.
+## 功能概览
 
-## Requirements
+- 基于 Textual 的 TUI，包含聊天区、输入框、状态栏和工具日志。
+- RuntimeController / RuntimeEngine 负责调度用户输入和运行结果。
+- AgentGraphRunner 使用 LangGraph 风格的流程组织 LLM 与工具调用。
+- 支持 OpenAI-compatible LLM provider，目前 TUI 默认配置为 Qwen / DashScope。
+- 内置文件、搜索和命令工具，例如 `file_read`、`glob`、`grep`、`file_write`、`file_edit`、`bash`、`powershell`。
+- PermissionGate 会在文件写入、文件编辑、shell 命令等高风险操作前进行检查。
+- ApprovalDialog 用于需要用户确认的工具调用。
+- 包含 diff、文件变更预览、权限审计、session override 等基础能力。
+
+## 环境要求
 
 - Python `>=3.12,<3.14`
 - `uv`
-- Windows PowerShell is supported during current development.
+- 当前开发环境主要在 Windows PowerShell 下验证
 
-Optional environment variables depend on the LLM provider you use. The current
-TUI runtime configuration uses DashScope / Qwen-compatible OpenAI API settings:
+如果使用当前 TUI 里的 Qwen / DashScope 配置，需要设置：
 
 ```powershell
 $env:DASHSCOPE_API_KEY = "your-api-key"
 ```
 
-## Install
+## 安装
 
-Run commands from the project root:
+请在项目根目录运行命令：
 
 ```powershell
 cd E:\MrWang\Desktop\pywork
 uv sync
 ```
 
-If `uv sync` reports a TOML parse error, check that `pyproject.toml` starts with
-a valid TOML table such as:
+如果 `uv sync` 报 TOML 解析错误，通常是 `pyproject.toml` 内容被误改了。文件开头应该类似：
 
 ```toml
 [project]
 ```
 
-Do not paste shell commands into `pyproject.toml`.
+不要把 `uv sync` 这类命令写进 `pyproject.toml`。
 
-## Run
+## 运行
 
-Start PyWork for the current workspace:
+启动当前工作区：
 
 ```powershell
 uv run pywork .
 ```
 
-Equivalent module entry:
+等价的模块运行方式：
 
 ```powershell
 uv run python -m pywork.entrypoints.cli .
 ```
 
-Run startup checks without launching the TUI:
+只做启动检查，不打开 TUI：
 
 ```powershell
 uv run pywork . --no-tui
 ```
 
-Print startup information as JSON:
+输出 JSON 启动信息：
 
 ```powershell
 uv run pywork . --json
 ```
 
-Run diagnostics:
+运行环境诊断：
 
 ```powershell
 uv run pywork doctor .
 ```
 
-Initialize PyWork files for a workspace:
+初始化 PyWork 工作区文件：
 
 ```powershell
 uv run pywork init .
 ```
 
-## TUI Shortcuts
+## TUI 快捷键
 
-Inside the TUI:
+- `q`：退出
+- `Ctrl+C`：退出
+- `Ctrl+L`：清空聊天
+- `Ctrl+R`：重置 token 计数
+- `Ctrl+S`：显示当前状态
 
-- `q`: quit
-- `Ctrl+C`: quit
-- `Ctrl+L`: clear chat
-- `Ctrl+R`: reset token counters
-- `Ctrl+S`: show current status
+输入框支持多行输入。提交快捷键由 `InputBox` 组件处理，当前开发中常用 `Ctrl+Enter` 或 `Ctrl+J`。
 
-The input box supports multi-line input. Use the configured submit shortcut in
-the input component, such as `Ctrl+Enter` or `Ctrl+J`, to submit.
+## 常用开发命令
 
-## Useful Development Commands
-
-Run the import smoke check from the project root:
+导入检查：
 
 ```powershell
 uv run python scripts/check_imports.py
 ```
 
-If you are already inside the `scripts` directory, run:
+如果你已经在 `scripts` 目录里：
 
 ```powershell
 uv run python check_imports.py
 ```
 
-Run all tests:
+运行全部测试：
 
 ```powershell
 uv run pytest
 ```
 
-Run focused test groups:
+运行部分测试：
 
 ```powershell
 uv run pytest tests\test_tui_app.py -q
@@ -141,68 +123,53 @@ uv run pytest tests\test_permission_gate.py -q
 uv run pytest tests\test_file_write_edit_tools.py -q
 ```
 
-Compile-check selected modules:
+编译检查：
 
 ```powershell
 uv run python -m compileall src\pywork
 ```
 
-## Project Layout
+## 项目结构
 
 ```text
 src/pywork/
-  entrypoints/          CLI startup, init, doctor
-  tui/                  Textual app and TUI components
-  runtime/              Runtime engine, graph, controller, events
-  llm/                  Provider routing and message conversion
-  tools/                Built-in tool implementations and registry
-  permission/           Permission policy, risk, audit, file/shell checks
-  schemas/              Message, tool, and config schemas
-  state/                App/session/UI state
-  storage/              Persistence and history helpers
-  utils/                Shared utilities
+  entrypoints/          CLI 启动、init、doctor
+  tui/                  Textual App 和 TUI 组件
+  runtime/              Runtime engine、graph、controller、events
+  llm/                  Provider 路由和消息转换
+  tools/                内置工具和工具注册表
+  permission/           权限策略、风险判断、审计、文件/命令检查
+  schemas/              message、tool、config schema
+  state/                app/session/UI state
+  storage/              持久化和历史记录
+  utils/                通用工具函数
 
-tests/                  Unit and integration-style tests
-config/                 Default TOML configuration files
-scripts/                Developer helper scripts
+tests/                  测试
+config/                 默认 TOML 配置
+scripts/                开发辅助脚本
 ```
 
-## Runtime Flow
-
-At a high level:
+## Runtime 流程
 
 ```text
-User input
+用户输入
 -> TUI InputBox
 -> PyWorkApp
 -> RuntimeController
 -> RuntimeEngine
 -> AgentGraphRunner
--> LLM / deterministic route
+-> LLM / 确定性路由
 -> Tool call
 -> PermissionGate
--> ApprovalDialog when needed
+-> ApprovalDialog
 -> Tool execution
 -> Tool result
--> final assistant response or next graph step
+-> 最终回复或下一轮 graph step
 ```
 
-For risky file and shell operations, the runtime checks permission rules before
-execution. Normal file writes and edits can require approval. Sensitive paths,
-protected project files, or dangerous shell commands can be denied or require
-elevated confirmation.
+对于文件写入、文件编辑、shell 命令等高风险操作，Runtime 会先执行权限检查。普通文件修改可能需要确认；敏感路径、保护文件或危险命令可能被拒绝或要求 elevated confirmation。
 
-## Current Status
+## 当前状态
 
-PyWork is pre-alpha. The architecture is actively evolving, and some modules are
-scaffolds for future functionality. The most actively developed areas are:
-
-- TUI component integration
-- Runtime graph behavior
-- tool result handling
-- file read / write / edit flows
-- approval and permission gate behavior
-- OpenAI-compatible LLM provider support
-
-Use the tests as the source of truth for currently expected behavior.
+PyWork 目前是 Pre-Alpha。项目的重点仍在 Runtime、TUI、工具调用、权限审批、文件读写编辑、LLM provider 连接和测试覆盖上。请以测试用例作为当前行为的主要参考。
 
