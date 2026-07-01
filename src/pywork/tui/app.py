@@ -27,6 +27,15 @@ from pywork.tui.components.status_bar import StatusBar
 from pywork.tui.components.tool_log import ToolLog
 
 
+PERMISSION_MODE_CYCLE: tuple[str, ...] = (
+    "default",
+    "accept_edits",
+    "plan",
+    "readonly",
+    "bypass",
+)
+
+
 @dataclass(frozen=True)
 class PyWorkTUIContext:
     workspace_path: str
@@ -340,6 +349,7 @@ class PyWorkApp(App[None]):
         Binding("ctrl+l", "clear_chat", "Clear Chat", priority=True),
         Binding("ctrl+r", "reset_tokens", "Reset Tokens", priority=True),
         Binding("ctrl+s", "show_status", "Show Status", priority=True),
+        Binding("tab", "cycle_permission_mode", "Switch Mode", priority=True),
     ]
 
     def __init__(
@@ -356,6 +366,7 @@ class PyWorkApp(App[None]):
 
         self.workspace = workspace
         self.config = config or {}
+        self.permission_mode = self.get_configured_permission_mode(self.config)
 
         self.context = PyWorkTUIContext(
             workspace_path=str(workspace),
@@ -384,20 +395,7 @@ class PyWorkApp(App[None]):
             model=self.get_model_name(),
             provider=self.get_provider_name(),
             permission_mode=self.get_permission_mode(),
-        )
-    def compose(self) -> ComposeResult:
-        with Vertical(id="main-layout"):
-            with Horizontal(id="main-area"):
-                yield ChatPanel(id="chat-panel")
-                yield ToolLog(id="tool-log")
-
-            yield InputBox(id="input-box")
-
-        yield StatusBar(
-            id="status-bar",
-            model=self.get_model_name(),
-            provider=self.get_provider_name(),
-            permission_mode=self.get_permission_mode(),
+            workspace_path=str(self.workspace),
         )
 
     def on_mount(self) -> None:
@@ -415,6 +413,8 @@ class PyWorkApp(App[None]):
                 self.get_configured_model_label(),
                 provider=self.get_configured_provider_name(),
             )
+            self.status_bar.set_workspace_path(str(self.workspace))
+            self.status_bar.set_permission_mode(self.get_permission_mode())
 
         self.chat_panel.append_system_message(
             "PyWork TUI ready. RuntimeController.stream() is connected."
@@ -430,7 +430,7 @@ class PyWorkApp(App[None]):
         runtime_config = dict(self.config)
         runtime_config["permissions"] = {
             **runtime_config.get("permissions", {}),
-            "mode": "default",
+            "mode": self.permission_mode,
         }
         runtime_config["agent"] = {
             **runtime_config.get("agent", {}),
@@ -493,7 +493,6 @@ class PyWorkApp(App[None]):
             ApprovalDialog(
                 decision,
                 title=title,
-                show_always_allow=True,
             )
         )
 
@@ -557,13 +556,35 @@ class PyWorkApp(App[None]):
         return "mock/local"
 
     def get_permission_mode(self) -> str:
-        return str(
+        return self.permission_mode
+
+    @staticmethod
+    def get_configured_permission_mode(config: dict[str, Any]) -> str:
+        mode = str(
             get_config_value(
-                self.get_runtime_config(),
+                config,
                 "permissions.mode",
                 "default",
             )
         )
+
+        if mode in PERMISSION_MODE_CYCLE:
+            return mode
+
+        return "default"
+
+    def set_permission_mode(self, mode: str) -> None:
+        if mode not in PERMISSION_MODE_CYCLE:
+            mode = "default"
+
+        self.permission_mode = mode
+        self.config.setdefault("permissions", {})["mode"] = mode
+
+        if self.status_bar is not None:
+            self.status_bar.set_permission_mode(mode)
+
+        if not self.runtime_busy:
+            self.runtime_controller = self.create_runtime_controller()
 
     def get_slash_commands(self) -> list[SlashCommand]:
         return get_builtin_slash_commands()
@@ -811,11 +832,39 @@ class PyWorkApp(App[None]):
         status_bar.set_idle("tokens reset")
         self.get_input_box().focus_input()
 
+    def action_cycle_permission_mode(self) -> None:
+        current_mode = self.get_permission_mode()
+
+        try:
+            current_index = PERMISSION_MODE_CYCLE.index(current_mode)
+        except ValueError:
+            current_index = 0
+
+        next_mode = PERMISSION_MODE_CYCLE[
+            (current_index + 1) % len(PERMISSION_MODE_CYCLE)
+        ]
+
+        self.set_permission_mode(next_mode)
+        self.get_status_bar().set_idle(f"mode switched to {next_mode}")
+        self.get_chat_panel().append_system_message(
+            f"Permission mode switched to `{next_mode}`."
+        )
+        self.get_input_box().focus_input()
+
     def on_key(self, event: Any) -> None:
         key = str(getattr(event, "key", "") or "")
 
         if key.lower() == "ctrl+r":
             self.action_reset_tokens()
+
+            if hasattr(event, "stop"):
+                event.stop()
+
+        if key.lower() == "tab":
+            self.action_cycle_permission_mode()
+
+            if hasattr(event, "prevent_default"):
+                event.prevent_default()
 
             if hasattr(event, "stop"):
                 event.stop()

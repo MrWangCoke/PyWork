@@ -169,7 +169,7 @@ class RuntimeEngine:
     注意：
     当前 LangGraph 是一次性 ainvoke 执行。
     pause() 主要用于阻止下一次 run 开始；
-    如果图已经进入某个非流式节点，pause 不会强行冻结该节点。
+    如果图已经进入某个非流式节点,pause 不会强行冻结该节点。
     abort() 会尝试 cancel 当前 asyncio task。
     """
 

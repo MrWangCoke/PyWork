@@ -87,11 +87,13 @@ class AgentGraphData(TypedDict, total=False):
     remaining_tool_calls: list[ToolCall]
     has_tool_call: bool
     """
-    LangGraph 闂備礁鎲￠崝鏇㈠箠濮椻偓瀹曟洟骞橀钘変汗闂佺厧鎽滈。浠嬪磻閹惧瓨濯寸痪鐗埫禍?
+    Whether the LLM output contains at least one tool call.
 
-    婵犵數鍋涢ˇ顓㈠礉瀹ュ绀堝ù鐓庣摠閺?
-    闂備焦妞挎禍鐐哄窗閹伴偊鏁嗘繝濠傜墛閸?Agent 闂備胶绮…鍫ュ春閺嶎厼鐒垫い鎴ｆ硶椤︼附銇勯弴銊ユ灓闁瑰憡甯￠崺鍕礃閳哄倹绶梻?agent_state 闂傚倷鐒﹁ぐ鍐偖椤愶箑鐒?
-    闂備胶顭堢换鎴濓耿閸︻厼鍨濇い鎺戝€甸崑鎾斥槈濞嗘ɑ鐣峰銈嗘煥閻倸顕ｆ导鎼晬婵浜瓏闂備礁鎲￠幐鍝ョ矓閺夋嚚鐟邦潨閳ь剟鐛鍫▉濡炪們鍨洪崹璺侯焽婵犳艾鐐婇柍鍦亾閻撶姵绻涢幋鐐存儎闁告ɑ鍎抽埢鎾诲箣閻愮鏋栭柣搴㈢⊕钃辨い蟻鍥ㄧ厸濞达絽鎼。鑲┾偓瑙勬尫缁舵碍淇?
+    Set by parse_tool_call_node after examining the LLM response.
+    When True, the graph routes to permission_check -> execute_tool.
+    When False and no assistant message is present, the graph stops.
+    The graph also inspects agent_state tool_calls to avoid re-emitting
+    tool call events that were already recorded in a previous iteration.
     """
 
     agent_state: AgentState
@@ -250,8 +252,13 @@ def create_default_agent_graph_state(
 
 def reset_agent_turn_state(state: AgentState) -> None:
     """
-    闁诲孩顔栭崰鎺楀磻閹炬枼鏀芥い鏃傗拡閸庢劙鏌＄仦鏂ゆ敾缂佸顦甸崺鈧い鎺嶇劍婵粍銇勯弮鍌氫壕闁哄棗绻橀弻鐔衡偓闈涙啞閻掕法绱掓０婵嗗籍鐎规洘顨婃俊鐑藉Ψ閵夘喗鐎梻浣瑰缁嬫垿寮甸鍌滃崥濠电姵纰嶉崑鐘绘煕閳╁啯绀堥柣鐔稿姇閳藉骞橀姘闂佸搫顦遍崕鎰板窗濮橆兘鏋旈柟瀵稿仧閳绘棃鎮楀☉娅虫垿藝瑜旈弻锝呂熼崹顔惧帿闂侀€炲苯鍘搁梻鍕Ч閸┾偓?
-    濠电偞鍨堕幐鍝ョ矓閻㈢數鍗氶柤濮愬€楅惌?messages闂備焦瀵х粙鎴炵附閺冨倻绠斿璺侯焾閳ь剚甯″畷銊╊敍濡や焦娅堥梻浣告啞閿氭俊顐ｎ殙閵?tool_calls闂?
+    Reset per-turn agent state before starting a new graph iteration.
+
+    If the agent is in a terminal state (FINISHED, ERROR, CANCELLED),
+    reset it to idle. Clears current_tool_call_id, last_error, resets
+    the iteration counter, and updates the timestamp.
+
+    Does NOT clear messages or tool_calls history.
     """
     if state.status in {
         AgentStatus.FINISHED,
@@ -268,12 +275,13 @@ def reset_agent_turn_state(state: AgentState) -> None:
 
 def user_input_node(data: AgentGraphData) -> dict[str, Any]:
     """
-    UserInput 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
+    UserInput node — the entry point of the agent graph.
 
-    闂佽崵濮甸崝妤呭窗閺囥垺鍎楁俊銈呮噺閺?
-    1. 闂備浇顫夋禍浠嬪磿閺屻儱鏋佺憸鐗堝笚閸嬨劑鏌曟繝蹇曠暠闁绘挻娲熷鍫曞醇閻旂纰嶉梺?
-    2. 闂備礁鎲￠崝鏍偡閵夆晛鐭?AgentState.messages
-    3. 闂?Agent 闂佸搫顦弲婊呯矙閹达箑鐭?idle 闂備胶绮…鍫ュ春閺嶎厼鐒垫い鎴ｆ硶缁涘繒绱掓潏銊х疄鐎规洘鐟╁畷鍗炍旀繝鍐冿絾绻涢幋鐐村碍妞ゆ垵瀚划鈺呭级閹搭厽妗ㄩ梺闈涱檧婵″洭鍩€椤掑鐏犳い鏇熺懄濞碱亪骞嶉鐐暟濠电偞鍨堕幐鎼侇敄閸℃稑鍑?
+    Responsibilities:
+    1. Reset per-turn agent state via reset_agent_turn_state().
+    2. Append the user's input to AgentState.messages.
+    3. Set the agent status to idle so the LLM node can proceed.
+    4. Emit lifecycle (STARTED) and message events for the TUI.
     """
     state = data["agent_state"]
     user_input = data.get("user_input", "").strip()
@@ -314,13 +322,13 @@ def user_input_node(data: AgentGraphData) -> dict[str, Any]:
 
 def build_context_node(data: AgentGraphData) -> dict[str, Any]:
     """
-    BuildContext 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
+    BuildContext node — assembles the context payload for the LLM call.
 
-    闂佽崵濮甸崝妤呭窗閺囥垺鍎楁俊銈呮噹閸戠娀鏌涢弴銊ヤ簽缂佹唻濡囩槐?LLM 濠电偠鎻紞鈧繛澶嬫礋瀵偊濡舵径瀣壄闂佸憡娲︽禍鐐烘偡閹邦兘妲堥柟鐐墯閸庢劙鏌＄€ｎ亜鏆ｉ柡?
-    - messages
-    - tool definitions
-    - workspace 濠电儑绲藉ú鐘诲礈濠靛洤顕?
-    - permission_mode
+    Collects all information the LLM router needs:
+    - messages (conversation history from AgentState)
+    - tool definitions (from ToolRegistry)
+    - workspace path and project root
+    - current permission_mode and iteration counter
     """
     state = data["agent_state"]
     registry = get_registry(data)
@@ -347,14 +355,16 @@ def build_context_node(data: AgentGraphData) -> dict[str, Any]:
 
 def parse_tool_shortcut(user_input: str) -> dict[str, Any] | None:
     """
-    濠电偞鍨堕幐鎼佹偤閵娿儺娓婚柛灞惧嚬閸熷懘鏌曟径鍫濆姎鐎电増妫冮幃鍦偓锝庝簻閺嗙喖鏌℃担闈涒偓妤呭箯閻樻椿鏁囬柣鏃€浜介埀顒€锕弻?
+    Parse a /tool shortcut from user input, bypassing the LLM.
 
-    闁荤喐绮庢晶妤呭箰閸涘﹥娅犻柣妯挎珪娴溿倖淇婇婵嗗惞婵﹪绠栭弻鐔煎箒閹烘垵濮㈠┑鐘亾闁挎稑瀚ч崑?LLM闂備焦瀵х粙鎴﹀嫉椤掍焦娅犵€广儱妫涢々鐑芥煏婢跺牆鍔氶悽顖樺劦閺岋繝鍩€椤掑嫷鏁嶆繛鎴烆焽濡茬兘姊?
-
+    Supports two formats:
         /tool echo hello
         /tool echo {"text": "hello"}
 
-    闂佸搫顦弲婊堟偡閿曞倹鍋嬮梺顒€绉撮惌妤併亜閺嶃劎鎳佺紒銊у缁绘盯寮堕幋顓炲壍闂佷紮瀵岄崹鎶藉焵椤掑倹鍤€闁哄牜鍓熷?Tool 闂備礁婀遍悷鎶藉幢閳哄倹鏉搁梻鍌欒兌閸嬫挸鐣峰鈧幆灞俱偅閸愩剮?
+    When the user starts input with "/tool <name>", this function
+    extracts the tool name and arguments directly, skipping the LLM
+    call. Returns a dict with "tool_name" and "arguments", or None
+    if the input is not a tool shortcut.
     """
     text = user_input.strip()
 
@@ -427,6 +437,56 @@ FILE_PATH_PATTERN = re.compile(
     r"(?P<path>[A-Za-z0-9_.\\/:-]+\.(?:md|py|toml|txt|json|yaml|yml|ini|cfg|rst))",
     re.IGNORECASE,
 )
+
+DIRECT_FINISH_TOOL_NAMES: set[str] = {
+    "file_write",
+    "file_edit",
+}
+
+
+def should_finish_after_tool_result(result: ToolResult) -> bool:
+    return result.tool_name in DIRECT_FINISH_TOOL_NAMES
+
+
+def build_direct_tool_finish_message(result: ToolResult) -> str:
+    return (
+        "文件操作已完成。\n\n"
+        f"Tool `{result.tool_name}` finished successfully.\n\n"
+        f"{result.content}"
+    )
+
+
+def is_permission_blocked_tool_result(result: ToolResult) -> bool:
+    metadata = result.metadata or {}
+    data = result.data or {}
+
+    return bool(
+        metadata.get("permission_blocked")
+        or data.get("permission_blocked")
+    )
+
+
+def build_permission_blocked_finish_message(result: ToolResult) -> str:
+    metadata = result.metadata or {}
+    decision = str(metadata.get("permission_decision") or "").strip()
+    reason = str(metadata.get("permission_reason") or "").strip()
+    user_denied = bool(metadata.get("user_denied"))
+
+    if user_denied:
+        title = "已取消执行。"
+        detail = f"你拒绝了 `{result.tool_name}` 的授权，所以工具没有运行，文件也没有被修改。"
+    elif decision == "deny":
+        title = "操作已被安全规则阻止。"
+        detail = f"`{result.tool_name}` 没有运行，文件没有被修改。"
+    else:
+        title = "操作需要授权，当前没有执行。"
+        detail = f"`{result.tool_name}` 没有运行，文件没有被修改。"
+
+    if reason:
+        return f"{title}\n\n{detail}\n\n原因：{reason}"
+
+    return f"{title}\n\n{detail}"
+
 
 DIRECTORY_PATH_PATTERN = re.compile(
     r"(?P<path>[A-Za-z0-9_.\\/-]+)(?:\s*(?:目录|文件夹|folder|directory))?",
@@ -688,9 +748,12 @@ def get_nested_value(
 
 def graph_has_llm_config(config: dict[str, Any]) -> bool:
     """
-    闂備礁鎲＄敮鍥磹閺嶎厼钃熼柛銉簵娴滃綊鏌熼幆褍鏆辨い銈呮嚇濮婃椽寮剁捄銊愩倝鏌ｉ妶鍛棦闁哄苯鐬兼禒锕傛倷椤戭偓绠撻弻娑橆潩妤ｅ啯顎嶅┑鐘亾?LLM 闂傚倷鐒﹀妯肩矓閸洘鍋柛鈩冪☉杩?
+    Check whether the config contains a usable LLM provider configuration.
 
-    婵犵數鍋涙径鍥礈濠靛棴鑰?LLM 闂傚倷鐒﹀妯肩矓閸洘鍋柛鈩冪☉缁秹鎮规担鍛婅础缂佲偓婢跺瞼纾藉ù锝呯墕閹虫劙寮ィ鍐╁仯?mock闂?
+    Looks for LLM-specific keys (provider, model, api_format, base_url,
+    api_key, api_key_env, providers, default_provider) in either a nested
+    "llm" key or at the top level. Returns False if no LLM config is found,
+    which causes the graph to fall back to mock mode.
     """
     if not config:
         return False
@@ -725,7 +788,12 @@ def message_role_value(message: Any) -> str:
 
 def agent_message_to_llm_message(message: Any) -> AnyMessage | None:
     """
-    AgentState 闂備礁鎲￠崝鏇㈠箠濮椻偓瀹?message -> schemas/message_schema.py 闂備焦鐪归崝宀€鈧凹鍘剧划鏃堟倻閽樺鐣冲銈嗙墬娑撹绗熼埀顒€鐣烽崷顓涘亾閿濆啫濡烽柛?
+    Convert an AgentState message to the schemas/message_schema.py format.
+
+    Maps role strings ("system", "user", "assistant", "tool", "error")
+    to the corresponding Pydantic message model. Tool messages are converted
+    to UserMessage (as observations) since the LLM router expects tool
+    results wrapped as user messages.
     """
     role = message_role_value(message)
     content = str(getattr(message, "content", "") or "")
@@ -759,10 +827,11 @@ def agent_message_to_llm_message(message: Any) -> AnyMessage | None:
         )
 
     if role == "tool":
-        # 闂備胶鍎甸弲鈺呭窗閺嶃劍娅?AgentState 闂?tool message 濠电偞鍨堕幐鍝ョ矓瀹曞洨鍗氶悗鐢电《閸嬫挾鎲撮崟顔碱棟闂?tool_call_id闂?
-        # 闂備胶顭堢换鎰版偋閹邦優褰掑幢濞戞顓?user 闂備礁鎲￠悷顖炲垂閻㈠壊鏁嬮柟娈垮枟閸犲棝鏌涚仦鐐殤婵＄虎浜炵槐鎾存媴鐟欏嫬闉嶉梺璇茬箰椤︾敻寮鍥︽勃闁兼亽鍎遍埀顒傛暬濮婂宕煎☉妯间患闂佸摜鍟块崑鎾绘⒑閸涘娈旀繛灞傚妽椤ㄣ儵宕堕鈧粻锝夋煙闁箑骞橀柛銊ャ偢閺?ToolMessage闂?
+        # AgentState stores tool results as "tool" messages. Since the LLM
+        # expects tool results as user messages (observations), wrap the
+        # tool result content with a descriptive prefix.
         return create_user_message(
-            "闁诲氦顫夐幃鍫曞磿闁秴鐭楅柛褎顨呯粻銉ф喐閹达负鈧線骞嬮悩鐢碉紲闂佽鍎抽顓熺椤栫偞鐓ユ繛鎴炵懅閹芥\n" + content,
+            "Tool execution result:\n" + content,
             metadata={
                 **metadata,
                 "source": "agent_state_tool_observation",
@@ -771,7 +840,7 @@ def agent_message_to_llm_message(message: Any) -> AnyMessage | None:
 
     if role == "error":
         return create_user_message(
-            "Runtime 闂傚倷鐒︾€笛囨偡閵娾晩鏁嬮柕鍫濐槹閺咁剚鎱ㄥ┑鍥ㄢ枎\n" + content,
+            "Runtime error:\n" + content,
             metadata={
                 **metadata,
                 "source": "agent_state_error",
@@ -783,7 +852,12 @@ def agent_message_to_llm_message(message: Any) -> AnyMessage | None:
 
 def build_llm_messages(data: AgentGraphData) -> list[AnyMessage]:
     """
-    闂備礁鎼鍛偓姘嵆閸┾偓妞ゆ帒鍊稿瓭閻熸粍婢橀崐鑽ゆ?LLMRouter 闂?messages闂?
+    Build the message list for the LLMRouter call.
+
+    Constructs messages from the system prompt (from config or DEFAULT_LLM_SYSTEM_PROMPT)
+    followed by converted AgentState messages (excluding system messages).
+    Applies max_context_messages truncation, keeping the system prompt and
+    the most recent history messages.
     """
     agent_state = data["agent_state"]
     config = data.get("config") or {}
@@ -853,12 +927,12 @@ def should_use_real_llm(data: AgentGraphData) -> bool:
 
 def get_graph_tool_definitions(data: AgentGraphData) -> list[dict[str, Any]]:
     """
-    濠?ToolRegistry 闂傚倷鐒﹁ぐ鍐嚐椤栨縿浜归柛銉戝苯鏅犻梺闈涱槶閸庡崬顕ラ弮鍫熷€甸悷娆忓閻擃垳绱掗悩闈涙灈闁轰礁绉舵禒锕傛嚃閳哄啫鈧偟绱?LLM tool calling闂?
+    Retrieve tool definitions from the ToolRegistry for LLM tool calling.
 
-    闂佸搫顦弲婊堝蓟閵娿儍娲冀椤撶偛鍞ㄩ梺缁樻尭濞撮娑甸埀顒勬⒑閸濆嫷妲堕柛搴㈡尦瀹曢潧顭ㄩ崼鐔告珫?
-        registry.list_definitions()
-
-    婵犳鍣徊鐣屾崲鐎ｎ喗鐓?definition 濠电姰鍨归悥銏ゅ礋閸偅鎮欓梻浣告惈鐎氱兘宕归悾灞绢潟?
+    Caches the result in data["tool_definitions"]. Each definition includes
+    the tool name, description, input_schema (JSON Schema), and risk_level.
+    The LLM router uses these definitions to decide which tools to call.
+    Format:
         {
             "name": "file_read",
             "description": "...",
@@ -888,7 +962,11 @@ def get_graph_tool_definitions(data: AgentGraphData) -> list[dict[str, Any]]:
 
 async def call_real_llm(data: AgentGraphData) -> AssistantMessage:
     """
-    闂佽崵濮撮鍛村疮娴兼潙鏋侀柕鍫濐槹閸庢垿鏌ｉ弮鍫闁?LLMRouter闂?
+    Call the real LLM through LLMRouter and return the AssistantMessage.
+
+    Creates the LLM router from config if not already cached in data,
+    builds the message list and tool definitions, then calls router.chat().
+    Stores the raw LLMResponse in data["llm_response"] for later parsing.
     """
     config = data.get("config") or {}
 
@@ -921,7 +999,7 @@ def add_assistant_message_to_agent_state(
     message: AssistantMessage,
 ) -> None:
     """
-    闂?AssistantMessage 闂備礁鎲￠崝鏍偡閵夈儍?AgentState闂?
+    Append an AssistantMessage to the AgentState message history.
     """
     metadata = {
         "source": "llm_router",
@@ -953,13 +1031,18 @@ def add_tool_call_to_agent_state(
 
 async def call_llm_node(data: AgentGraphData) -> AgentGraphData:
     """
-    闂佽崵濮撮鍛村疮娴兼潙鏋?LLM闂?
+    CallLLM node — the "thinking" step of the agent loop.
 
-    闂備礁鎼悧鍡浰囬崡鐑囪€块柨娑樺閸?LLM 闂傚倷鐒﹀妯肩矓閸洘鍋柛鈩冪☉缁秹鎮规担鍛婅础缂?
-        闂佽崵濮撮鍛村疮娴兼潙鏋?LLMRouter
+    When a real LLM is configured:
+        Calls LLMRouter via call_real_llm().
 
-    婵犵數鍋涙径鍥礈濠靛棴鑰垮〒姘ｅ亾闁哄苯锕ら濂稿炊閳哄倻鈧?/ 闂傚倷鐒﹀妯肩矓閸洘鍋柛鈩兠欢鐐哄级閸偄浜悮婵嬫⒑閸濆嫬鏆㈡い鏃€鍔楀Σ?
-        fallback 闂?mock_call_llm_output
+    When no LLM is configured or the call fails with fallback_to_mock:
+        Falls back to mock_call_llm_output() which generates deterministic
+        responses for /tool shortcuts and echoes user input.
+
+    Before calling the LLM, checks for deterministic file-read intents
+    (detect_next_file_tool_call) to skip the LLM call entirely when the
+    user's intent is unambiguous (e.g. "read README.md").
     """
     agent_state = data["agent_state"]
 
@@ -1159,12 +1242,11 @@ def mark_graph_stop(
 
 def normalize_tool_call_list(value: Any) -> list[ToolCall]:
     """
-    闂備胶顢婂▔娑㈡晝閿濆洨绠斿鑸靛姇鐟欙箓鎮橀悙闈涗壕闂傚嫬绉电换婵婎槼闁告梹顨呴埢?tool_calls 缂傚倸鍊烽懗鍫曞窗瀹ュ洨鍗氶悗娑櫳戞慨婊勩亜閹哄秶顦﹂柣?list[ToolCall]闂?
+    Normalize various tool call representations into a list[ToolCall].
 
-    闂備浇銆€閸嬫挻銇勯弽銊р槈闁伙富鍣ｉ弻?
-    - list[ToolCall]
-    - tuple[ToolCall]
-    - 闂備礁鎲￠〃鍡椕洪幋锔界厒?ToolCall
+    Handles:
+    - list[ToolCall] / tuple[ToolCall]
+    - single ToolCall instance
     - None
     """
     if value is None:
@@ -1189,7 +1271,7 @@ def extract_tool_calls_from_assistant_message(
     assistant_message: AssistantMessage | None,
 ) -> list[ToolCall]:
     """
-    濠?AssistantMessage 闂傚倷鐒﹁ぐ鍐嚐椤栨縿浜?tool_calls闂?
+    Extract tool_calls from an AssistantMessage.
     """
     if assistant_message is None:
         return []
@@ -1203,10 +1285,12 @@ def extract_tool_calls_from_llm_response(
     llm_response: Any,
 ) -> list[ToolCall]:
     """
-    濠?LLMResponse 闂傚倷鐒﹁ぐ鍐嚐椤栨縿浜?tool_calls闂?
+    Extract tool_calls from an LLMResponse, handling multiple SDK formats.
 
-    providers.py 闂傚倷鐒﹁ぐ鍐儔閻撳簶鏋?LLMResponse 闁诲氦顫夐悺鏇犱焊濞嗘垵鍨濋柨鐔哄Т缁?OpenAI / Anthropic 闂備焦鐪归崝宀€鈧凹鍨抽幑銏ゅ箣閿曗偓閻?
-    缂傚倸鍊烽懗鍫曞窗瀹ュ洨鍗氶悗闈涙啞閸犲棝鏌ㄥ┑鍡橆棤闁逞屽厸缁瑩鐛€ｎ喖绠涙い蹇撴閺?ToolCall闂備焦瀵х粙鎴﹀嫉椤掍焦娅犵€广儱妫涢々鐑芥煏婢跺牆濡跨紒鐘茬秺濮婃椽骞撻幒鎴缂備焦顨呴ˇ闈浳涙笟鈧崺鈧い鎺戝€归崯鍝劽归敐鍥剁劸闁哄懏鐟╅幃宄扳枎濞嗘垹蓱闂佽绨肩划娆忕暦閵忋倖鍋勫┑鍌氼槹缂?SDK 闂佽娴烽弫鎼併€佹繝鍥ㄥ瘶闁告洦鍨拌繚?
+    The providers.py LLMResponse may carry tool_calls from different SDKs
+    (OpenAI / Anthropic). This function normalizes them into a list[ToolCall].
+    Checks LLMResponse.tool_calls first, then falls back to
+    LLMResponse.message.tool_calls if the message is an AssistantMessage.
     """
     if llm_response is None:
         return []
@@ -1228,12 +1312,11 @@ def extract_tool_calls_from_llm_response(
 
 def parse_mock_tool_call_from_text(text: str) -> ToolCall | None:
     """
-    mock 婵犵妲呴崹顏堝焵椤掆偓绾绢厾娑甸埀顒佺箾閹寸偞灏い鎴炲灩濡叉劕鈹戦崶鈺婃祫?JSON 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢鏃堟煛鐏炶鍔氭繛鍜冪節閹嘲鈻庡▎鎴犐戦梺璇叉唉濡嫰顢欒箛娑樜ㄩ柕澶堝劚缁额噣鏌ｉ悩宸剰闁哥喍鍗冲顐﹀Χ婢跺á?
+    Parse a tool call from mock LLM output (JSON text).
 
-    闂備浇銆€閸嬫挻銇勯弽銊р槈闁伙富鍣ｉ弻鈥愁吋閸パ冧粯缂備焦鍞荤换婵嬪极?
+    The mock LLM outputs JSON with a "tool_name" field. Also supports
+    the alternate format with "name" instead of "tool_name":
         {"tool_name": "grep", "arguments": {...}}
-
-    闂備胶鎳撻悺銊╂偋椤撶姵顫?
         {"name": "grep", "arguments": {...}}
     """
     raw = text.strip()
@@ -1274,10 +1357,13 @@ def set_parsed_tool_calls(
     source: str,
 ) -> AgentGraphData:
     """
-    闂備胶顢婂▔娑㈡晝閵婎煈鏆伴梻浣告惈椤戝棝宕濋弴銏犲惞妞ゆ挶鍨洪崕?tool_calls 闂備礁鎲￠崝鏍偡閵夆晛鐭?GraphData闂?
+    Store parsed tool calls into GraphData and emit events.
 
-    闁荤喐绮庢晶妤呭箰閸涘﹥娅?Runtime Graph 闂備胶顭堢换鎰版偋婵犲啯娅犻柣锝呮湰閸嬫鈧厜鍋撻柍褜鍓熼、鏍炊閵娧€鏋栭梺閫炲苯澧紒瀣樀椤㈡棃宕熼鍡欑厬闂備胶顭堢换鎺楀蓟婢舵劖鍎嶉柣鏂垮悑閸嬨劑鏌曟繝蹇曞矝闁?
-    濠电姰鍨奸崺鏍儗椤曗偓閺屽苯顭ㄩ崘鎯ф櫊闂侀潧顦崕鍗烆嚗閺冨牊鍋ｉ悗锝庝簻閺嗙喖鏌℃担闈涒偓婵嗙暦濡ゅ懎閱囬柣鏂挎啞濠㈡帡姊?remaining_tool_calls闂備焦瀵х粙鎴︽嚐椤栫偛绠栨俊銈呮噺椤ュ牓鏌曡箛鏇炐㈤悹浣瑰絻闇夐柣姗嗗枛閸旀氨鈧娲栭惉濂告儉椤忓浂妲奸梺鎼炲妽瀹€鎼佺嵁瀹ュ牄浜归柟鐑樺灦椤?婵°倗濮烽崑鐐哄磿婵傛悶鈧線骞嬮敃鈧粻銉ф喐閹达负鈧線骞嬮敃鈧繚?
+    Sets data["parsed_tool_calls"], data["tool_call"] (first call),
+    data["remaining_tool_calls"] (calls after the first), and
+    data["has_tool_call"]. Each tool call is added to AgentState and
+    emitted via emit_tool_call_event_once (deduplicated). If tool_calls
+    is empty, marks the graph as "stop" since there is nothing to execute.
     """
     agent_state = data["agent_state"]
 
@@ -1333,23 +1419,24 @@ def set_parsed_tool_calls(
 
 def parse_tool_call_node(data: AgentGraphData) -> AgentGraphData:
     """
-    ParseToolCall 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
+    ParseToolCall node -- extract tool calls from the LLM response.
 
-    闂備浇銆€閸嬫挻銇勯弽銊р槈闁伙富鍠栭埥澶愬箻閹颁焦楔濡炪値鍋呯敮鈥愁嚕閸洖唯闁挎柨澧介崺宥夋⒑?
-    1. 闂備焦妞挎禍鐐哄窗鎼淬劍鍋?LLMResponse.tool_calls
-    2. 闂備焦妞挎禍鐐哄窗鎼淬劍鍋?AssistantMessage.tool_calls
-    3. mock 婵犵妲呴崹顏堝焵椤掆偓绾绢厾娑甸埀?JSON 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢?
+    Examines three sources in order:
+    1. LLMResponse.tool_calls (native provider SDK tool calls)
+    2. AssistantMessage.tool_calls (message-level tool calls)
+    3. Mock LLM output JSON (parsed from llm_output text)
 
-    闂佽崵鍠愰悷銉р偓姘煎墴瀹曞綊顢涢悙瀛樻珫?
-    - 闂佽崵鍠愰悷杈╁緤妤ｅ啯鍊靛ù鐘差儏缁€?tool_call闂備焦瀵х粙鎺撶┍閾忚宕叉慨妞诲亾鐎?PermissionCheck / ExecuteTool
-    - 婵犵數鍋涙径鍥礈濠靛棴鑰?tool_call闂備焦瀵х粙鎺戭潩閵娧冨灊闁靛ň鏅涚痪?Graph
+    Routing outcomes:
+    - Has tool calls -> routes to PermissionCheck then ExecuteTool
+    - No tool calls, has assistant message -> marks graph finished, stops
+    - No tool calls, mock text -> renders as plain assistant response, stops
     """
     agent_state = data["agent_state"]
 
     llm_response = data.get("llm_response")
     assistant_message = data.get("assistant_message")
 
-    # 1. 濠电偞娼欓崥瀣晪闂佸憡蓱缁嬫帞绮?LLMResponse 闂佽崵鍠愰悷杈╁緤妤ｅ啯鍊?tool_calls
+    # 1. Try extracting tool_calls from the native LLMResponse
     response_tool_calls = extract_tool_calls_from_llm_response(llm_response)
 
     if response_tool_calls:
@@ -1365,7 +1452,7 @@ def parse_tool_call_node(data: AgentGraphData) -> AgentGraphData:
             source="llm_response",
         )
 
-    # 2. 闂備礁鎲￠崝鏇犵矓瀹曞洤鍨?AssistantMessage 闂佽崵鍠愰悷杈╁緤妤ｅ啯鍊?tool_calls
+    # 2. Try extracting tool_calls from the AssistantMessage
     if isinstance(assistant_message, AssistantMessage):
         add_assistant_message_to_agent_state(
             agent_state,
@@ -1424,7 +1511,7 @@ def parse_tool_call_node(data: AgentGraphData) -> AgentGraphData:
             reason="assistant_message_no_tool_call",
         )
 
-    # 3. mock 婵犵妲呴崹顏堝焵椤掆偓绾绢厾娑甸埀顒勬⒑閹稿海鈯曢柣顓у枤閸?llm_output 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢鏃堟煠閼测晝绀嬮柟鐑橆殔閸?JSON 闁诲氦顫夐幃鍫曞磿闁秴鐭楅悹鎭掑妽鐎氼剟鏌涢幇鍏哥凹闁?
+    # 3. Try parsing mock JSON tool call from llm_output text
     llm_output = str(data.get("llm_output", "") or "").strip()
 
     if not llm_output:
@@ -1451,7 +1538,7 @@ def parse_tool_call_node(data: AgentGraphData) -> AgentGraphData:
             source="mock_json",
         )
 
-    # 4. 闂備礁鎼幏瀣闯閿濆鐒垫い鎺嶈兌椤ｆ煡鏌＄€ｎ亜鏆ｇ€殿喚鏁婚、妤呭焵椤掆偓鐓ら柡宥冨妼缁剁偟鈧箍鍎辩换鎺旂矆婢跺绠鹃悘鐐殿焾婢у弶绻濋埀顒佹媴閸撴彃鏅犻梺闈涱槶閸庡崬顕ラ弮鍫熷仯閻庯綆浜滈弳鐔兼煛?
+    # 4. No tool calls found -- treat as plain text assistant response
     message = create_assistant_message(
         llm_output,
         metadata={
@@ -1538,14 +1625,13 @@ def evaluate_permission(
     permission_mode: str,
 ) -> PermissionDecision:
     """
-    PermissionCheck 闂備焦鐪归崝宀€鈧凹鍙冮幃褏鈧湱濮烽悿鈧梺鍛婂姂閸斿矂鎮橀弻銉︾厸闁稿被鍊曢獮鎴︽煃?
+    PermissionCheck -- evaluate whether a tool call is allowed.
 
-    闁荤喐绮庢晶妤呭箰閸涘﹥娅犻柣妯虹仛閸犲棝鏌涢弴銊ヤ簻闁诲繒鍠栭弻?
-    - 婵犵數鍋涙径鍥礈濠靛棴鑰垮ù锝呭閸熷懘鏌曟径鍫濆姎鐎电増妫冮幃鍦偓锝庝簻閺嗙喖鏌℃担闈涒偓婵嬪极瀹ュ拋娼╂い鎺嗗亾閻㈩垱甯￠幃瑙勬媴閸涘﹥鍠愰梺瑙勬尦椤ユ挾妲?
-    - plan 婵犵妲呴崹顏堝焵椤掆偓绾绢厾娑甸埀顒勬⒑閹稿海鈯曢柣顓у枤缁厽寰勯幇顒傤吋閻熸粍鍨块妴渚€骞嬪┑鎰櫊闂侀潧顦崕鍗烆嚗?
-    - default闂備焦瀵х粙鎺楁嚌妤ｅ啫鍌ㄩ柟瀵稿У婵?safe/low
-    - accept_edits闂備焦瀵х粙鎺楁嚌妤ｅ啫鍌ㄩ柟瀵稿У婵?safe/low/medium
-    - bypass_permissions闂備焦瀵х粙鎺楁嚌妤ｅ啫鐭楅煫鍥ㄧ⊕閻掗箖鏌曟繛鍨姎閻㈩垱甯￠幃?
+    Permission mode determines max allowed risk level:
+    - plan mode: no tools execute at all
+    - default: safe/low risk tools allowed
+    - accept_edits: safe/low/medium risk tools allowed
+    - bypass_permissions: all tools allowed
     """
     if call is None:
         return PermissionDecision(
@@ -1774,6 +1860,9 @@ def apply_approval_override_if_needed(
 def make_permission_blocked_tool_result(
     tool_call: ToolCall,
     gate_result: PermissionGateResult,
+    *,
+    user_denied: bool = False,
+    blocked_reason: str = "permission_blocked",
 ) -> ToolResult:
     decision = gate_result.decision
 
@@ -1800,16 +1889,42 @@ def make_permission_blocked_tool_result(
             f"- Matched rules: {', '.join(gate_result.rule_result.matched_rules) or '(none)'}\n"
         )
 
-    try:
-        return ToolResult.error_result(
-            call=tool_call,
-            error=content,
-        )
-    except TypeError:
-        return ToolResult.error_result(
-            call=tool_call,
-            content=content,
-        )
+    rule_result = gate_result.rule_result
+    metadata = {
+        "permission_blocked": True,
+        "blocked_reason": blocked_reason,
+        "user_denied": user_denied,
+        "permission_decision": decision.decision.value,
+        "permission_mode": decision.mode.value,
+        "permission_risk": decision.risk.value,
+        "permission_reason": decision.reason,
+    }
+
+    data = {
+        "permission_blocked": True,
+        "blocked_reason": blocked_reason,
+        "user_denied": user_denied,
+        "decision": decision.decision.value,
+        "mode": decision.mode.value,
+        "risk": decision.risk.value,
+        "reason": decision.reason,
+    }
+
+    if rule_result is not None:
+        metadata["rule_source"] = rule_result.source
+        metadata["matched_rules"] = list(rule_result.matched_rules)
+        data["rule_check"] = {
+            "source": rule_result.source,
+            "decision": rule_result.decision.value,
+            "matched_rules": list(rule_result.matched_rules),
+        }
+
+    return ToolResult.error_result(
+        call=tool_call,
+        error=content,
+        data=data,
+        metadata=metadata,
+    )
 
 
 def extract_tool_exit_code(result: ToolResult | None) -> int | None:
@@ -1877,9 +1992,11 @@ def record_graph_permission_execution_result(
 
 def permission_check_node(data: AgentGraphData) -> AgentGraphData:
     """
-    PermissionCheck 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
+    PermissionCheck node -- evaluate tool call against permission policy.
 
-    闂佽崵濮甸崝妤呭窗閺囥垺鍎楁俊銈呮噹閸愨偓闁荤喐鐟ョ€氼剛绮?permission_mode 闂備礁鎲＄划宀勬嚐椤栨稑顕遍柟鐗堟緲缁€?risk_level 闂備礁鎲＄敮鍥磹閺嶎厼钃熼柛銉墮閸欏﹥銇勯弽銊ь暡闁稿骸锕弻娑滅疀鎼淬垻銈板銈嗘煥缁绘﹢鐛鍫▉濡炪們鍨洪崹鎸庝繆?
+    Uses the PermissionGate to check the current tool call against
+    the configured permission_mode and risk_level. Emits status events
+    with the permission decision for TUI display.
     """
     state = data["agent_state"]
     call = data.get("parsed_tool_call")
@@ -2323,6 +2440,7 @@ async def execute_tool_node(data: AgentGraphData) -> dict[str, Any]:
             result = make_permission_blocked_tool_result(
                 tool_call,
                 gate_result,
+                blocked_reason="permission_blocked",
             )
 
             data["tool_result"] = result
@@ -2397,6 +2515,12 @@ async def execute_tool_node(data: AgentGraphData) -> dict[str, Any]:
             result = make_permission_blocked_tool_result(
                 tool_call,
                 gate_result,
+                user_denied=approval_result is not None,
+                blocked_reason=(
+                    "user_denied"
+                    if approval_result is not None
+                    else "approval_unavailable"
+                ),
             )
 
             data["tool_result"] = result
@@ -2691,6 +2815,50 @@ def append_observation_node(data: AgentGraphData) -> AgentGraphData:
                     reason="glob_result_queued_file_reads",
                 )
 
+        if should_finish_after_tool_result(result):
+            message = build_direct_tool_finish_message(result)
+
+            if hasattr(agent_state, "add_assistant_message"):
+                agent_state.add_assistant_message(
+                    message,
+                    metadata={
+                        "source": "tool_result_direct_finish",
+                        "tool_name": result.tool_name,
+                        "call_id": result.call_id,
+                    },
+                )
+            elif hasattr(agent_state, "add_message"):
+                agent_state.add_message(
+                    "assistant",
+                    message,
+                    metadata={
+                        "source": "tool_result_direct_finish",
+                        "tool_name": result.tool_name,
+                        "call_id": result.call_id,
+                    },
+                )
+
+            emit_status_event(
+                data,
+                "tool_result_finished",
+                content="tool result completed without final llm",
+                metadata={
+                    "node": "append_observation",
+                    "tool_name": result.tool_name,
+                },
+            )
+
+            data["awaiting_final_response"] = False
+            data["file_read_batch_active"] = False
+
+            if hasattr(agent_state, "set_finished"):
+                agent_state.set_finished()
+
+            return mark_graph_stop(
+                data,
+                reason="tool_result_direct_finish",
+            )
+
         observation = (
             f"Tool `{result.tool_name}` finished successfully.\n\n"
             f"Tool result:\n\n{result.content}\n\n"
@@ -2749,6 +2917,56 @@ def append_observation_node(data: AgentGraphData) -> AgentGraphData:
             reason="tool_result_observed_continue_to_llm",
         )
 
+    if is_permission_blocked_tool_result(result):
+        message = build_permission_blocked_finish_message(result)
+
+        if hasattr(agent_state, "add_assistant_message"):
+            agent_state.add_assistant_message(
+                message,
+                metadata={
+                    "source": "permission_blocked_direct_finish",
+                    "tool_name": result.tool_name,
+                    "call_id": result.call_id,
+                },
+            )
+        elif hasattr(agent_state, "add_message"):
+            agent_state.add_message(
+                "assistant",
+                message,
+                metadata={
+                    "source": "permission_blocked_direct_finish",
+                    "tool_name": result.tool_name,
+                    "call_id": result.call_id,
+                },
+            )
+
+        emit_status_event(
+            data,
+            "tool_result_finished",
+            content="permission blocked tool result completed",
+            metadata={
+                "node": "append_observation",
+                "tool_name": result.tool_name,
+                "permission_blocked": True,
+                "blocked_reason": (result.metadata or {}).get("blocked_reason"),
+            },
+        )
+
+        data["awaiting_final_response"] = False
+        data["file_read_batch_active"] = False
+        data["error"] = None
+
+        if hasattr(agent_state, "last_error"):
+            agent_state.last_error = None
+
+        if hasattr(agent_state, "set_finished"):
+            agent_state.set_finished()
+
+        return mark_graph_stop(
+            data,
+            reason="permission_blocked_direct_finish",
+        )
+
     error_text = result.error or result.content
 
     if hasattr(agent_state, "set_error"):
@@ -2784,11 +3002,11 @@ def compact_messages_if_needed(
     max_messages: int = 40,
 ) -> bool:
     """
-    缂傚倷鑳舵慨顓㈠磻閹剧粯鐓曟俊銈勭劍绾捐崵绱掑Δ鈧崐鍦矙婢跺备鍋撻敐搴′簼闁诲寒鍣ｉ弻娑樜熸笟顖氬壋缂傚倸鍊搁ˇ鍨繆?
+    Compact message history when it exceeds max_messages.
 
-    闁荤喐绮庢晶妤呭箰閸涘﹥娅犻柣妯兼暩妞规娊鏌″搴′簼婵炲牞缍侀弻?
-    - 婵犵數鍋為崹鐢告偋婵犲啫顕遍柛娑欐綑閺嬩礁霉閸忓吋缍戞繛鍛€曢埥澶愬箻瀹曞泦銉х磼婢跺﹦鎽犳繛?max_messages闂備焦瀵х粙鎺楁儗椤斿墽绠斿鑸靛姇閸屻劑鎮楅敐搴″缂?
-    - 闂佺儵鍓濈敮鎺楀箠閹捐埖宕查柛鎰靛枛鐟欙箓骞栫€涙绠樼紒鐘辩矙閺岋綁鏁愰崱娆愬櫘濡炪倖鍨靛ú锔剧矙婢舵劕鐒垫い鎺戝缁?system 婵犵數鍋為崹鐢告偋婵犲啫顕遍柛娑欐綑濡炰粙鎮橀悙闈涗壕濞寸姵锕㈠鍫曞煛閸屾氨浼囬柣搴㈠搸閸ㄤ粙鎮伴鈧畷锝嗗緞鐎ｎ厽瀚繝鐢靛仦閸ㄧ敻鎮ф繝鍐嚤?
+    Keeps the first system message and the most recent (max_messages-1)
+    messages. Drops messages in the middle. Sets metadata["compacted"]=True
+    to record that compaction occurred.
     """
     if len(state.messages) <= max_messages:
         return False
@@ -2813,10 +3031,10 @@ def compact_messages_if_needed(
 
 def compact_if_needed_node(data: AgentGraphData) -> dict[str, Any]:
     """
-    CompactIfNeeded 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
+    CompactIfNeeded node -- truncate message history before next LLM call.
 
-    闂備礁鎲￠懝鎯归悜鑺ュ仺濠电姵鑹鹃惌妤併亜閺嶃劎鎳佺紒銊ゅ嵆閺岋繝宕堕妸銉殝閻庤娲橀悡锟犵嵁鐎ｎ喖绠涙い鏃囨閻掔鈹戦鐣岀缂佹彃鐏濋埢鎾诲箣閿曗偓缁犵儤淇婇娑卞劌婵炶缍侀弻娑樜熸笟顖氬壋缂傚倸鍊搁ˇ鍨繆?
-    闁荤喐绮庢晶妤呭箰閸涘﹥娅犻柣妯款嚙缁€鍌炴煕椤愶絿绠戠紒顔炬暩缁辨帡鎮╅顫闂備礁鎲￠〃鍡椕哄鈧畷娲川閺夋垶顥濆銈嗘尰缁诲嫮绮绘禒瀣厽闁挎繂妫涢幊鈧梺?
+    Skips compaction during active file_read batches to avoid losing
+    context mid-operation. Otherwise calls compact_messages_if_needed().
     """
     state = data["agent_state"]
     config = get_config(data)
@@ -2859,13 +3077,13 @@ def compact_if_needed_node(data: AgentGraphData) -> dict[str, Any]:
 
 def continue_or_stop_node(data: AgentGraphData) -> AgentGraphData:
     """
-    闂備礁鎲＄敮鍥磹閺嶎厼钃?Graph 闂備礁鎼€氱兘宕规导鏉戠畾濞达綀娅ｇ壕鑲╂喐韫囨稒鍋ㄥ┑鐘宠壘杩?
+    ContinueOrStop node -- decide whether the graph loops or terminates.
 
-    闂佽崵鍠愰悷銉р偓姘煎墴瀹曞綊顢涢悙瀛樻珫?
-    - 闂?error闂備焦瀵х粙鎺楊敆閻犵郸p
-    - 闂?pending tool_call闂備焦瀵х粙鎺楁偤閻犵tinue
-    - 闂?tool_call闂備焦瀵х粙鎺楊敆閻犵郸p
-    - 闂佺儵鍓濈敮鎺楀箠閹捐埖宕?max_iterations闂備焦瀵х粙鎺楊敆閻犵郸p
+    Routes based on:
+    - error present -> stop
+    - pending tool_call -> continue
+    - no tool_call -> stop
+    - max_iterations reached -> stop
     """
     agent_state = data["agent_state"]
 
@@ -2929,7 +3147,7 @@ def route_continue_or_stop(data: AgentGraphData) -> GraphRoute:
 
 def build_agent_graph():
     """
-    闂備礁鎼鍛偓姘煎墰缁?LangGraph 闂備礁婀遍悷鎶藉幢閳哄倹鏉搁梻浣规偠閸庝即宕熷鈧崺鈧?
+    Build and compile the LangGraph agent execution graph.
     """
     if StateGraph is None:
         raise RuntimeError(
@@ -2973,11 +3191,11 @@ def build_agent_graph():
 
 class AgentGraphRunner:
     """
-    Agent Graph 闂佸搫顦弲婊堝礉濮椻偓閵嗕線骞嬮敃鈧梻顖炴煏婵犲繒宀涢柛?
+    AgentGraphRunner -- wraps the compiled LangGraph for easy invocation.
 
-    濠电姰鍨奸崺鏍偋閻樿纾块柟缁㈠枛缁犳娊鏌曟繛鍨缂佲偓閸愵煁褰掓晲閸喓銆婇梺杞伴檷閸婃繈寮?
-        runner = AgentGraphRunner()
-        state = await runner.arun("hello")
+    Usage:
+        runner = AgentGraphRunner(registry=..., config=...)
+        state = await runner.arun("user input")
     """
 
     def __init__(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from pywork.permission.audit import PermissionAuditUserAction
 from pywork.runtime.events import RuntimeEventBus, RuntimeEventType
 from pywork.runtime.controller import RuntimeController
 from pywork.runtime.graph import (
@@ -62,6 +63,40 @@ async def test_runtime_graph_executes_default_registry_tools(
     assert state.get_last_message() is not None
     assert f"`{tool_name}`" in state.get_last_message().content
     assert "Now answer the original user request" in state.get_last_message().content
+
+
+def test_append_observation_direct_finishes_file_write() -> None:
+    tool_call = create_tool_call(
+        tool_name="file_write",
+        arguments={
+            "path": "src/pywork/utils/manual_verify_helper.py",
+            "content": "def manual_verify_helper():\n    return \"ok\"\n",
+        },
+    )
+    result = ToolResult.success_result(
+        call=tool_call,
+        content="file_write success",
+    )
+    data = create_default_agent_graph_state(
+        user_input="create file",
+        registry=create_default_registry(),
+    )
+    data["tool_call"] = tool_call
+    data["parsed_tool_call"] = tool_call
+    data["has_tool_call"] = True
+    data["tool_result"] = result
+    data["has_tool_result"] = True
+
+    data = append_observation_node(data)
+    state = data["agent_state"]
+
+    assert data["route_reason"] == "tool_result_direct_finish"
+    assert data["graph_route"] == "stop"
+    assert data["awaiting_final_response"] is False
+    assert state.status.value == "finished"
+    assert state.get_last_message() is not None
+    assert state.get_last_message().role == "assistant"
+    assert "file_write success" in state.get_last_message().content
 
 
 @pytest.mark.asyncio
@@ -257,6 +292,104 @@ async def test_runtime_controller_stream_yields_tool_events_and_result() -> None
     assert RuntimeEventType.TOOL_RESULT in {event.event_type for event in events}
     assert events[-1].event_type == RuntimeEventType.LIFECYCLE
     assert events[-1].lifecycle == "finished"
+
+
+@pytest.mark.asyncio
+async def test_runtime_controller_stream_finishes_after_file_write(
+    tmp_path,
+) -> None:
+    controller = RuntimeController(
+        app_state=create_app_state(
+            workspace_path=tmp_path,
+            project_root=tmp_path,
+            config={
+                "workspace": {
+                    "path": str(tmp_path),
+                    "project_root": str(tmp_path),
+                },
+                "permissions": {
+                    "mode": "accept_edits",
+                },
+                "agent": {
+                    "max_iterations": 5,
+                    "max_context_messages": 20,
+                },
+            },
+        )
+    )
+
+    events = [
+        event
+        async for event in controller.stream(
+            '/tool file_write {"path": "manual_verify_helper.py", '
+            '"content": "def manual_verify_helper():\\n    return \\"ok\\"\\n"}'
+        )
+    ]
+    result = controller.get_last_stream_result()
+
+    assert result is not None
+    assert result.success is True
+    assert "文件操作已完成" in result.output
+    assert (tmp_path / "manual_verify_helper.py").exists()
+    assert any(
+        event.event_type == RuntimeEventType.STATUS
+        and getattr(event, "status", "") == "tool_result_finished"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_controller_stream_finishes_after_user_denies_file_write(
+    tmp_path,
+) -> None:
+    class DenyApprovalResult:
+        user_action = PermissionAuditUserAction.DENY
+        allowed = False
+        always_allow = False
+
+    async def approval_handler(gate_result):
+        return DenyApprovalResult()
+
+    controller = RuntimeController(
+        app_state=create_app_state(
+            workspace_path=tmp_path,
+            project_root=tmp_path,
+            config={
+                "workspace": {
+                    "path": str(tmp_path),
+                    "project_root": str(tmp_path),
+                },
+                "permissions": {
+                    "mode": "default",
+                },
+                "agent": {
+                    "max_iterations": 5,
+                    "max_context_messages": 20,
+                },
+            },
+        ),
+        approval_handler=approval_handler,
+    )
+
+    events = [
+        event
+        async for event in controller.stream(
+            '/tool file_write {"path": "manual_verify_reject.py", '
+            '"content": "print(\\"reject test\\")\\n"}'
+        )
+    ]
+    result = controller.get_last_stream_result()
+
+    assert result is not None
+    assert result.success is True
+    assert "没有运行" in result.output
+    assert controller.is_running is False
+    assert not (tmp_path / "manual_verify_reject.py").exists()
+    assert any(
+        event.event_type == RuntimeEventType.STATUS
+        and getattr(event, "status", "") == "tool_result_finished"
+        for event in events
+    )
 
 
 def test_build_llm_messages_keeps_multi_turn_history() -> None:

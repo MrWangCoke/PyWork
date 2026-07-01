@@ -603,15 +603,69 @@ class RuntimeController:
         )
 
         completed_normally = False
+        event_iterator = stream.__aiter__()
+        event_task: asyncio.Task[RuntimeEvent] | None = None
 
         try:
-            async for event in stream:
-                yield event
+            while True:
+                if event_task is None:
+                    event_task = asyncio.create_task(event_iterator.__anext__())
 
-            completed_normally = True
-            self._last_stream_result = await run_task
+                done, _pending = await asyncio.wait(
+                    {
+                        event_task,
+                        run_task,
+                    },
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if event_task in done:
+                    try:
+                        event = event_task.result()
+                    except StopAsyncIteration:
+                        event_task = None
+                        completed_normally = True
+                        self._last_stream_result = await run_task
+                        break
+
+                    event_task = None
+                    yield event
+                    continue
+
+                if run_task in done:
+                    self._last_stream_result = await run_task
+
+                    # The event stream normally closes itself on terminal
+                    # lifecycle events. If a graph path finishes without
+                    # emitting such an event, do not leave the TUI waiting
+                    # forever. Give queued final events a brief chance to
+                    # arrive, then finish the controller stream.
+                    try:
+                        event = await asyncio.wait_for(
+                            event_task,
+                            timeout=0.2,
+                        )
+                    except StopAsyncIteration:
+                        completed_normally = True
+                        event_task = None
+                        break
+                    except TimeoutError:
+                        event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await event_task
+                        event_task = None
+                        completed_normally = True
+                        break
+
+                    event_task = None
+                    yield event
 
         finally:
+            if event_task is not None and not event_task.done():
+                event_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await event_task
+
             await stream.aclose(
                 reason=RuntimeStreamCloseReason.NORMAL,
                 message="controller stream closed",

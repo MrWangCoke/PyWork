@@ -39,6 +39,7 @@ class StatusInfo:
     model: str
     provider: str
     permission_mode: str
+    workspace_path: str
     token_usage: TokenUsage
     state: str
     message: str = ""
@@ -78,6 +79,7 @@ class StatusBar(Widget):
         model: str = "deepseek-v4-flash",
         provider: str = "deepseek",
         permission_mode: str = "default",
+        workspace_path: str = ".",
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
@@ -86,6 +88,7 @@ class StatusBar(Widget):
         self.model = model
         self.provider = provider
         self.permission_mode = permission_mode
+        self.workspace_path = workspace_path
 
         self.input_tokens = 0
         self.output_tokens = 0
@@ -108,6 +111,7 @@ class StatusBar(Widget):
             model=self.model,
             provider=self.provider,
             permission_mode=self.permission_mode,
+            workspace_path=self.workspace_path,
             token_usage=TokenUsage(
                 input_tokens=self.input_tokens,
                 output_tokens=self.output_tokens,
@@ -131,6 +135,10 @@ class StatusBar(Widget):
 
     def set_permission_mode(self, mode: str) -> None:
         self.permission_mode = mode
+        self.refresh_status()
+
+    def set_workspace_path(self, path: str) -> None:
+        self.workspace_path = path
         self.refresh_status()
 
     def set_token_usage(
@@ -193,11 +201,13 @@ class StatusBar(Widget):
         line.update(self.render_status_line())
 
     def render_status_line(self) -> str:
+        model_label = self.model if "/" in self.model else f"{self.model}/{self.provider}"
+
         return (
             f"{self.state}: {self.message}"
-            f" | tok {self.input_tokens}/{self.output_tokens}/{self.total_tokens}"
-            f" | model {self.model}/{self.provider}"
-            f" | perm {self.permission_mode}"
+            f" | dir {self.workspace_path}"
+            f" | model {model_label}"
+            f" | mode {self.permission_mode} [Tab]"
         )
 
     def render_left(self) -> str:
@@ -209,9 +219,8 @@ class StatusBar(Widget):
 
     def render_right(self) -> str:
         return (
-            f"tokens: {self.input_tokens} in / "
-            f"{self.output_tokens} out / "
-            f"{self.total_tokens} total "
+            f"dir: {self.workspace_path} "
+            f"| mode: {self.permission_mode} [Tab] "
             f"| {self.state}: {self.message}"
         )
 
@@ -244,7 +253,7 @@ class StatusBarDemoApp(App[None]):
         Binding("t", "tokens", "Add Tokens", priority=True),
         Binding("r", "reset", "Reset Tokens", priority=True),
         Binding("m", "model", "Switch Model", priority=True),
-        Binding("p", "permission", "Switch Permission", priority=True),
+        Binding("tab", "permission", "Switch Permission", priority=True),
     ]
 
     def compose(self) -> ComposeResult:

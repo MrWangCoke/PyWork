@@ -8,10 +8,12 @@ import pytest
 from pywork.permission.audit import PermissionAuditUserAction
 from pywork.permission.policy import PermissionDecisionType
 from pywork.runtime.graph import (
+    append_observation_node,
     create_default_agent_graph_state,
     execute_tool_node,
     permission_check_node,
 )
+from pywork.runtime.state import AgentStatus
 from pywork.schemas.tool_schema import create_tool_call
 
 
@@ -130,6 +132,47 @@ async def test_file_write_does_not_run_after_user_deny(tmp_path: Path) -> None:
     result = output["tool_result"]
 
     assert not result.success
+    assert not (tmp_path / "src" / "utils" / "helper.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_user_denied_file_write_finishes_without_runtime_error(
+    tmp_path: Path,
+) -> None:
+    async def approval_handler(gate_result):
+        return FakeApprovalResult(
+            user_action=PermissionAuditUserAction.DENY,
+            allowed=False,
+        )
+
+    data = make_graph_data(
+        tmp_path,
+        mode="default",
+        approval_handler=approval_handler,
+    )
+
+    attach_tool_call(
+        data,
+        tool_name="file_write",
+        arguments={
+            "path": "src/utils/helper.py",
+            "content": "print('hello')\n",
+        },
+    )
+
+    data = permission_check_node(data)
+    data = await execute_tool_node(data)
+    data = append_observation_node(data)
+
+    state = data["agent_state"]
+    last_message = state.get_last_message()
+
+    assert state.status == AgentStatus.FINISHED
+    assert state.last_error is None
+    assert data["graph_route"] == "stop"
+    assert data["route_reason"] == "permission_blocked_direct_finish"
+    assert last_message is not None
+    assert "没有运行" in last_message.content
     assert not (tmp_path / "src" / "utils" / "helper.py").exists()
 
 

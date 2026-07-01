@@ -63,7 +63,19 @@ def test_file_change_dialog_uses_accept_reject_labels() -> None:
     assert dialog.has_diff_preview
     assert dialog.allow_label == "Accept"
     assert dialog.deny_label == "Reject"
-    assert dialog.always_allow_label == "Always Allow"
+
+
+def test_approval_dialog_does_not_expose_always_allow() -> None:
+    decision = make_file_write_decision()
+    dialog = ApprovalDialog(
+        decision,
+        show_always_allow=True,
+    )
+
+    actions = {binding[1] for binding in dialog.BINDINGS}
+
+    assert dialog.show_always_allow is False
+    assert "always_allow" not in actions
 
 
 def test_normal_tool_dialog_uses_allow_deny_labels() -> None:

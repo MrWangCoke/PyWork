@@ -85,7 +85,8 @@ async def test_pywork_app_ctrl_r_resets_tokens_with_visible_feedback() -> None:
         chat_panel = app.query_one("#chat-panel")
 
         assert status_bar.total_tokens == 0
-        assert "0/0/0" in screenshot
+        assert status_bar.permission_mode == "default"
+        assert "dir" in screenshot
         assert any(message.content == "Token usage reset." for message in chat_panel.messages)
 
 
@@ -111,7 +112,7 @@ async def test_pywork_app_ctrl_r_key_event_fallback_resets_tokens() -> None:
         await pilot.pause()
 
         assert status_bar.total_tokens == 0
-        assert "0/0/0" in app.export_screenshot()
+        assert "dir" in app.export_screenshot()
 
 
 @pytest.mark.asyncio
@@ -158,3 +159,25 @@ async def test_pywork_app_status_bar_uses_qwen_runtime_model() -> None:
 
         assert status_bar.model == "qwen3.6-flash/qwen"
         assert status_bar.provider == "qwen"
+
+
+@pytest.mark.asyncio
+async def test_pywork_app_tab_switches_permission_mode() -> None:
+    app = PyWorkApp(
+        config={
+            "permissions": {
+                "mode": "default",
+            },
+        }
+    )
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        status_bar = app.query_one("#status-bar")
+
+        await pilot.press("tab")
+        await pilot.pause()
+
+        assert app.get_permission_mode() == "accept_edits"
+        assert status_bar.permission_mode == "accept_edits"
+        assert app.get_runtime_config()["permissions"]["mode"] == "accept_edits"
+        assert "[Tab]" in status_bar.render_status_line()

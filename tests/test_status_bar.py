@@ -19,7 +19,8 @@ async def test_status_bar_demo_key_bindings_update_visible_status() -> None:
 
         assert status_bar.total_tokens == 192
         assert status_bar.state == "thinking"
-        assert "192" in screenshot
+        assert status_bar.permission_mode == "default"
+        assert "dir" in screenshot
         assert "thinking" in screenshot
 
 

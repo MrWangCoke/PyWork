@@ -366,14 +366,12 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
     按钮：
         Allow
         Deny
-        Always Allow
     """
 
     BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
         ("escape", "deny", "Deny"),
         ("a", "allow", "Allow"),
         ("d", "deny", "Deny"),
-        ("shift+a", "always_allow", "Always Allow"),
     ]
 
     DEFAULT_CSS = """
@@ -436,14 +434,14 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
         decision: PermissionDecision,
         *,
         title: str | None = "Approve Operation",
-        show_always_allow: bool = True,
+        show_always_allow: bool = False,
         max_argument_chars: int = DEFAULT_ARGUMENT_MAX_CHARS,
         diff_text: str | None = None,
         preview_renderable: RenderableType | None = None,
     ) -> None:
         super().__init__()
         self.decision = decision
-        self.show_always_allow = show_always_allow
+        self.show_always_allow = False
         self.max_argument_chars = max_argument_chars
         self.diff_text = diff_text
         self.preview_renderable = preview_renderable
@@ -467,10 +465,6 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
     def deny_label(self) -> str:
         return "Reject" if self.is_file_change else "Deny"
     
-    @property
-    def always_allow_label(self) -> str:
-        return "Always Allow"
-
     def compose(self) -> ComposeResult:
         with Container():
             yield Static(
@@ -503,13 +497,6 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
                     self.allow_label,
                     id="approval-allow",
                 )
-
-                if self.show_always_allow:
-                    yield Button(
-                        self.always_allow_label,
-                        id="always_allow",
-                        variant="warning",
-                    )
 
     def _render_title(self) -> Text:
         title = Text(self.title_text, style="bold")
@@ -563,15 +550,6 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
             )
             return
 
-        if button_id == "approval-always-allow":
-            self.dismiss(
-                approval_result_from_choice(
-                    self.decision,
-                    ApprovalChoice.ALWAYS_ALLOW,
-                )
-            )
-            return
-
     def action_allow(self) -> None:
         self.dismiss(
             approval_result_from_choice(
@@ -587,18 +565,6 @@ class ApprovalDialog(ModalScreen[ApprovalDialogResult]):
                 ApprovalChoice.DENY,
             )
         )
-
-    def action_always_allow(self) -> None:
-        if not self.show_always_allow:
-            return
-
-        self.dismiss(
-            approval_result_from_choice(
-                self.decision,
-                ApprovalChoice.ALWAYS_ALLOW,
-            )
-        )
-
 
 def demo_decision(
     *,

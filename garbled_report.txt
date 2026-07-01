@@ -1,0 +1,84 @@
+Lines 1309-1309 (1 lines)
+  [1310] len=74: starts with chr U+0020
+
+Lines 1311-1312 (2 lines)
+  [1312] len=119: starts with chr U+0020
+  [1313] len=200: starts with chr U+0020
+
+Lines 1368-1368 (1 lines)
+  [1369] len=38: starts with chr U+0020
+
+Lines 1370-1373 (4 lines)
+  [1371] len=54: starts with chr U+0020
+  [1372] len=43: starts with chr U+0020
+  [1373] len=48: starts with chr U+0020
+  [1374] len=57: starts with chr U+0020
+
+Lines 1375-1377 (3 lines)
+  [1376] len=26: starts with chr U+0020
+  [1377] len=85: starts with chr U+0020
+  [1378] len=54: starts with chr U+0020
+
+Lines 1384-1384 (1 lines)
+  [1385] len=63: starts with chr U+0020
+
+Lines 1400-1400 (1 lines)
+  [1401] len=64: starts with chr U+0020
+
+Lines 1459-1459 (1 lines)
+  [1460] len=125: starts with chr U+0020
+
+Lines 1486-1486 (1 lines)
+  [1487] len=113: starts with chr U+0020
+
+Lines 1573-1573 (1 lines)
+  [1574] len=66: starts with chr U+0020
+
+Lines 1575-1580 (6 lines)
+  [1576] len=38: starts with chr U+0020
+  [1577] len=89: starts with chr U+0020
+  [1578] len=74: starts with chr U+0020
+  [1579] len=41: starts with chr U+0020
+  [1580] len=53: starts with chr U+0020
+  [1581] len=58: starts with chr U+0020
+
+Lines 1912-1912 (1 lines)
+  [1913] len=40: starts with chr U+0020
+
+Lines 1914-1914 (1 lines)
+  [1915] len=147: starts with chr U+0020
+
+Lines 2819-2819 (1 lines)
+  [2820] len=66: starts with chr U+0020
+
+Lines 2821-2823 (3 lines)
+  [2822] len=38: starts with chr U+0020
+  [2823] len=96: starts with chr U+0020
+  [2824] len=150: starts with chr U+0020
+
+Lines 2848-2848 (1 lines)
+  [2849] len=40: starts with chr U+0020
+
+Lines 2850-2851 (2 lines)
+  [2851] len=115: starts with chr U+0020
+  [2852] len=89: starts with chr U+0020
+
+Lines 2894-2894 (1 lines)
+  [2895] len=58: starts with chr U+0020
+
+Lines 2896-2900 (5 lines)
+  [2897] len=26: starts with chr U+0020
+  [2898] len=26: starts with chr U+0020
+  [2899] len=42: starts with chr U+0020
+  [2900] len=30: starts with chr U+0020
+  [2901] len=47: starts with chr U+0020
+
+Lines 2964-2964 (1 lines)
+  [2965] len=57: starts with chr U+0020
+
+Lines 3008-3008 (1 lines)
+  [3009] len=47: starts with chr U+0020
+
+Lines 3010-3010 (1 lines)
+  [3011] len=54: starts with chr U+0020
+

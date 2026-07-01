@@ -459,7 +459,74 @@ def append_tool_result_to_agent_state(
     - 有些 AgentState.add_message() 会把 dict 当成普通 content
     - 直接 append dict 最稳定，build_llm_messages 后面也更容易识别
     """
+    tool_results = getattr(
+        agent_state,
+        "tool_results",
+        None,
+    )
+
+    if isinstance(tool_results, list):
+        result_id = getattr(
+            result,
+            "result_id",
+            None,
+        )
+        already_recorded = any(
+            getattr(item, "result_id", None) == result_id
+            for item in tool_results
+        )
+
+        if result_id is None or not already_recorded:
+            tool_results.append(result)
+
+        current_tool_call_id = getattr(
+            agent_state,
+            "current_tool_call_id",
+            None,
+        )
+        result_call_id = get_tool_result_call_id(result)
+
+        if current_tool_call_id == result_call_id:
+            agent_state.current_tool_call_id = None
+
+        if bool(getattr(result, "success", False)):
+            set_idle = getattr(agent_state, "set_idle", None)
+
+            if callable(set_idle):
+                set_idle()
+        else:
+            set_error = getattr(agent_state, "set_error", None)
+
+            if callable(set_error):
+                set_error(
+                    str(
+                        getattr(result, "error", None)
+                        or getattr(result, "content", None)
+                        or "tool failed"
+                    )
+                )
+
     message = tool_result_to_agent_message(result)
+
+    add_tool_message = getattr(
+        agent_state,
+        "add_tool_message",
+        None,
+    )
+
+    if callable(add_tool_message):
+        add_tool_message(
+            message["content"],
+            name=message.get("name"),
+            tool_call_id=message.get("tool_call_id"),
+            metadata={
+                "success": bool(getattr(result, "success", False)),
+                "status": str(getattr(result, "status", "")),
+                "duration_ms": getattr(result, "duration_ms", None),
+                "source": "tool_result_payload",
+            },
+        )
+        return agent_state
 
     messages = getattr(
         agent_state,
