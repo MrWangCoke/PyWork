@@ -384,42 +384,112 @@ def create_default_registry() -> ToolRegistry:
     """
     创建默认工具注册表。
 
-    当前阶段注册：
+    当前默认注册：
     - EchoTool
     - FileReadTool
     - GlobTool
     - GrepTool
-
-    后面会在这里继续注册：
+    - FileWriteTool
+    - FileEditTool
     - BashTool
-    - WriteFileTool
-    - EditFileTool
-    """
+    - PowerShellTool
 
+    注意：
+    file_write / file_edit / bash / powershell 都是高风险工具。
+    它们注册进来只是为了让 Agent 能看到工具定义。
+    真正执行前必须经过 Runtime PermissionGate。
+    """
+    from pywork.tools.bash import BashTool
+    from pywork.tools.file_edit import FileEditTool
     from pywork.tools.file_read import FileReadTool
+    from pywork.tools.file_write import FileWriteTool
     from pywork.tools.glob import GlobTool
     from pywork.tools.grep import GrepTool
+    from pywork.tools.powershell import PowerShellTool
 
     registry = ToolRegistry()
 
     registry.register(
         EchoTool(),
         source="builtin",
+        metadata={
+            "category": "utility",
+            "requires_permission_gate": False,
+        },
     )
 
     registry.register(
         FileReadTool(),
         source="builtin",
+        metadata={
+            "category": "file",
+            "operation": "read",
+            "requires_permission_gate": True,
+        },
     )
 
     registry.register(
         GlobTool(),
         source="builtin",
+        metadata={
+            "category": "file",
+            "operation": "list",
+            "requires_permission_gate": True,
+        },
     )
 
     registry.register(
         GrepTool(),
         source="builtin",
+        metadata={
+            "category": "file",
+            "operation": "search",
+            "requires_permission_gate": True,
+        },
+    )
+
+    registry.register(
+        FileWriteTool(),
+        source="builtin",
+        metadata={
+            "category": "file",
+            "operation": "write",
+            "requires_permission_gate": True,
+            "requires_diff_preview": True,
+        },
+    )
+
+    registry.register(
+        FileEditTool(),
+        source="builtin",
+        metadata={
+            "category": "file",
+            "operation": "edit",
+            "requires_permission_gate": True,
+            "requires_diff_preview": True,
+        },
+    )
+
+    registry.register(
+        BashTool(),
+        source="builtin",
+        metadata={
+            "category": "shell",
+            "operation": "execute",
+            "requires_permission_gate": True,
+            "requires_command_safety_check": True,
+        },
+    )
+
+    registry.register(
+        PowerShellTool(),
+        source="builtin",
+        metadata={
+            "category": "shell",
+            "operation": "execute",
+            "requires_permission_gate": True,
+            "requires_command_safety_check": True,
+        },
     )
 
     return registry

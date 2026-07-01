@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from pywork.permission.session_overrides import PermissionGateState
 from pywork.runtime.events import RuntimeEventBus, get_default_event_bus
 from pywork.runtime.graph import AgentGraphRunner
 from pywork.runtime.state import AgentState, AgentStatus, create_agent_state
@@ -181,12 +182,16 @@ class RuntimeEngine:
         engine_config: RuntimeEngineConfig | None = None,
         event_bus: RuntimeEventBus | None = None,
         emit_events: bool = True,
+        approval_handler: Any | None = None,
+        permission_gate_state: PermissionGateState | None = None,
     ) -> None:
         self.registry = registry or create_default_registry()
         self.config = config or {}
         self.engine_config = engine_config or RuntimeEngineConfig()
         self.event_bus = event_bus or get_default_event_bus()
         self.emit_events = emit_events
+        self.approval_handler = approval_handler
+        self.permission_gate_state = permission_gate_state or PermissionGateState()
 
         self.agent_state = agent_state or create_agent_state(
             system_prompt=None,
@@ -204,6 +209,8 @@ class RuntimeEngine:
             config=self.config,
             event_bus=self.event_bus,
             emit_events=self.emit_events,
+            approval_handler=self.approval_handler,
+            permission_gate_state=self.permission_gate_state,
         )
 
         self.status: RuntimeStatus = RuntimeStatus.IDLE

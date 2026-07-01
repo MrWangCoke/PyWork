@@ -194,6 +194,7 @@ class RuntimeController:
         controller_config: RuntimeControllerConfig | None = None,
         event_bus: RuntimeEventBus | None = None,
         emit_events: bool = True,
+        approval_handler: Any | None = None,
     ) -> None:
         self.app_state = app_state or create_app_state(
             config=config or {},
@@ -202,6 +203,7 @@ class RuntimeController:
         self.controller_config = controller_config or RuntimeControllerConfig()
         self.event_bus = event_bus or get_default_event_bus()
         self.emit_events = emit_events
+        self.approval_handler = approval_handler
         self._last_stream_result: RuntimeControllerRunResult | None = None
 
         self.engine = engine or RuntimeEngine(
@@ -210,6 +212,7 @@ class RuntimeController:
             agent_state=None,
             event_bus=self.event_bus,
             emit_events=self.emit_events,
+            approval_handler=self.approval_handler,
         )
 
         self.status: RuntimeControllerStatus = RuntimeControllerStatus.READY

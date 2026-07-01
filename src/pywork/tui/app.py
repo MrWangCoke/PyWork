@@ -15,7 +15,12 @@ from textual.containers import Horizontal, Vertical
 
 from pywork.runtime.controller import RuntimeController
 from pywork.runtime.events import RuntimeEvent
+from pywork.runtime.permission_gate import PermissionGateResult
 from pywork.state.app_state import create_app_state
+from pywork.tui.components.approval_dialog import (
+    ApprovalDialog,
+    ApprovalDialogResult,
+)
 from pywork.tui.components.chat_panel import ChatPanel
 from pywork.tui.components.input_box import InputBox, InputSubmitted
 from pywork.tui.components.status_bar import StatusBar
@@ -468,6 +473,28 @@ class PyWorkApp(App[None]):
 
         return RuntimeController(
             app_state=app_state,
+            approval_handler=self.request_tool_approval,
+        )
+
+    async def request_tool_approval(
+        self,
+        gate_result: PermissionGateResult,
+    ) -> ApprovalDialogResult | None:
+        """
+        Open the approval dialog for ask / ask_elevated runtime tool calls.
+        """
+        decision = gate_result.decision
+        title = "Approve Tool Operation"
+
+        if decision.is_elevated:
+            title = "Approve Elevated Operation"
+
+        return await self.push_screen_wait(
+            ApprovalDialog(
+                decision,
+                title=title,
+                show_always_allow=True,
+            )
         )
 
     def get_chat_panel(self) -> ChatPanel:

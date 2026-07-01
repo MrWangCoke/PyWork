@@ -10,6 +10,11 @@ from pywork.schemas.message_schema import (
     create_user_message,
 )
 
+from pywork.runtime.tool_result_payload import (
+    append_tool_result_to_agent_state,
+    build_tool_result_agent_content,
+)
+
 from pywork.llm.providers import LLMResponse
 from pywork.schemas.message_schema import AssistantMessage, create_assistant_message
 from pywork.schemas.tool_schema import ToolCall, create_tool_call
@@ -22,6 +27,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from pywork.permission.audit import (
+    PermissionAuditLog,
+    PermissionAuditUserAction,
+)
+from pywork.permission.session_overrides import (
+    PermissionGateState,
+    user_action_is_allow,
+    user_action_is_always_allow,
+)
+from pywork.runtime.permission_gate import (
+    PermissionGate,
+    PermissionGateResult,
+    render_permission_gate_result,
+)
 from pywork.runtime.state import AgentState, AgentStatus, create_agent_state
 from pywork.runtime.events import (
     RuntimeEvent,
@@ -83,6 +102,11 @@ class AgentGraphData(TypedDict, total=False):
 
     parsed_tool_call: ToolCall | None
     permission_decision: PermissionDecision | None
+    permission_gate_result: PermissionGateResult | None
+    permission_gate_error: str | None
+    approval_handler: Any | None
+    approval_result: Any | None
+    permission_gate_state: PermissionGateState | None
 
     tool_result: ToolResult | None
     observation: str
@@ -212,6 +236,11 @@ def create_default_agent_graph_state(
         "llm_output": "",
         "parsed_tool_call": None,
         "permission_decision": None,
+        "permission_gate_result": None,
+        "permission_gate_error": None,
+        "approval_handler": None,
+        "approval_result": None,
+        "permission_gate_state": None,
         "tool_result": None,
         "observation": "",
         "should_continue": False,
@@ -1561,6 +1590,291 @@ def evaluate_permission(
     )
 
 
+def get_permission_gate_enabled(data: AgentGraphData) -> bool:
+    config = get_config(data)
+
+    return bool(
+        get_nested_config_value(
+            config,
+            "permissions.enabled",
+            True,
+        )
+    )
+
+
+def get_permission_audit_enabled(data: AgentGraphData) -> bool:
+    config = get_config(data)
+
+    return bool(
+        get_nested_config_value(
+            config,
+            "permissions.audit_enabled",
+            True,
+        )
+    )
+
+
+def create_graph_permission_gate(data: AgentGraphData) -> PermissionGate:
+    return PermissionGate(
+        workspace_path=get_workspace_path(data),
+        audit_enabled=get_permission_audit_enabled(data),
+        session_id=data.get("session_id"),
+        session_state=get_permission_gate_state(data),
+    )
+
+
+def get_permission_gate_state(data: AgentGraphData) -> PermissionGateState:
+    state = data.get("permission_gate_state")
+
+    if isinstance(state, PermissionGateState):
+        return state
+
+    state = PermissionGateState()
+    data["permission_gate_state"] = state
+
+    return state
+
+
+async def maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+
+    return value
+
+
+async def request_graph_approval(
+    data: AgentGraphData,
+    gate_result: PermissionGateResult,
+) -> Any | None:
+    """
+    Call the external approval handler supplied by the TUI/controller.
+    """
+    handler = data.get("approval_handler")
+
+    if handler is None:
+        return None
+
+    result = handler(gate_result)
+
+    return await maybe_await(result)
+
+
+def get_approval_user_action(approval_result: Any) -> PermissionAuditUserAction:
+    if approval_result is None:
+        return PermissionAuditUserAction.DENY
+
+    user_action = getattr(
+        approval_result,
+        "user_action",
+        None,
+    )
+
+    if user_action is not None:
+        return PermissionAuditUserAction(str(getattr(user_action, "value", user_action)))
+
+    choice = getattr(
+        approval_result,
+        "choice",
+        None,
+    )
+
+    if choice is not None:
+        value = str(getattr(choice, "value", choice))
+
+        if value == "allow":
+            return PermissionAuditUserAction.ALLOW
+
+        if value == "always_allow":
+            return PermissionAuditUserAction.ALWAYS_ALLOW
+
+        return PermissionAuditUserAction.DENY
+
+    allowed = bool(
+        getattr(
+            approval_result,
+            "allowed",
+            False,
+        )
+    )
+
+    return (
+        PermissionAuditUserAction.ALLOW
+        if allowed
+        else PermissionAuditUserAction.DENY
+    )
+
+
+def approval_result_allows(approval_result: Any) -> bool:
+    return user_action_is_allow(
+        get_approval_user_action(approval_result),
+    )
+
+
+def approval_result_is_always_allow(approval_result: Any) -> bool:
+    return user_action_is_always_allow(
+        get_approval_user_action(approval_result),
+    )
+
+
+def record_graph_permission_user_decision(
+    data: AgentGraphData,
+    gate_result: PermissionGateResult,
+    approval_result: Any,
+    *,
+    reason: str | None = None,
+) -> None:
+    """
+    Record the user's approval decision.
+
+    When approval_result is None, record it as DENY. This covers a missing
+    approval handler, a dismissed dialog, or no explicit user confirmation.
+    """
+    if not get_permission_audit_enabled(data):
+        return
+
+    audit_log = PermissionAuditLog(
+        get_workspace_path(data),
+    )
+
+    audit_log.record_user_decision(
+        gate_result.decision,
+        user_action=get_approval_user_action(approval_result),
+        session_id=data.get("session_id"),
+        reason=reason,
+        metadata={
+            "node": "approval",
+            "run_id": get_graph_run_id(data),
+            "checkpoint_id": data["agent_state"].checkpoint_id,
+            "approval_result_present": approval_result is not None,
+        },
+    )
+
+
+def apply_approval_override_if_needed(
+    data: AgentGraphData,
+    gate_result: PermissionGateResult,
+    approval_result: Any,
+) -> None:
+    if not approval_result_is_always_allow(approval_result):
+        return
+
+    state = get_permission_gate_state(data)
+
+    state.add_always_allow(
+        gate_result.decision,
+        rule_result=gate_result.rule_result,
+        reason="user selected Always Allow",
+        metadata={
+            "run_id": get_graph_run_id(data),
+            "call_id": gate_result.decision.request.call_id,
+        },
+    )
+
+
+def make_permission_blocked_tool_result(
+    tool_call: ToolCall,
+    gate_result: PermissionGateResult,
+) -> ToolResult:
+    decision = gate_result.decision
+
+    if decision.denied:
+        title = "Permission denied"
+    elif decision.is_elevated:
+        title = "Elevated approval required"
+    else:
+        title = "Approval required"
+
+    content = (
+        f"{title}: tool `{tool_call.tool_name}` was not executed.\n\n"
+        f"Decision: {decision.decision.value}\n"
+        f"Mode: {decision.mode.value}\n"
+        f"Risk: {decision.risk.value}\n"
+        f"Reason: {decision.reason}\n"
+    )
+
+    if gate_result.rule_result is not None:
+        content += (
+            "\nRule check:\n"
+            f"- Source: {gate_result.rule_result.source}\n"
+            f"- Rule decision: {gate_result.rule_result.decision.value}\n"
+            f"- Matched rules: {', '.join(gate_result.rule_result.matched_rules) or '(none)'}\n"
+        )
+
+    try:
+        return ToolResult.error_result(
+            call=tool_call,
+            error=content,
+        )
+    except TypeError:
+        return ToolResult.error_result(
+            call=tool_call,
+            content=content,
+        )
+
+
+def extract_tool_exit_code(result: ToolResult | None) -> int | None:
+    if result is None:
+        return None
+
+    data = getattr(result, "data", None)
+
+    if not isinstance(data, dict):
+        return None
+
+    exit_code = data.get("exit_code")
+
+    if exit_code is None:
+        shell_result = data.get("shell_result")
+
+        if isinstance(shell_result, dict):
+            exit_code = shell_result.get("exit_code")
+
+    if exit_code is None:
+        return None
+
+    try:
+        return int(exit_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def record_graph_permission_execution_result(
+    data: AgentGraphData,
+    gate_result: PermissionGateResult | None,
+    *,
+    executed: bool,
+    result: ToolResult | None = None,
+    reason: str | None = None,
+) -> None:
+    """
+    Record whether the tool ultimately executed.
+    """
+    if gate_result is None:
+        return
+
+    if not get_permission_audit_enabled(data):
+        return
+
+    audit_log = PermissionAuditLog(
+        get_workspace_path(data),
+    )
+
+    audit_log.record_execution_result(
+        gate_result.decision,
+        executed=executed,
+        success=(result.success if result is not None else False),
+        exit_code=extract_tool_exit_code(result),
+        session_id=data.get("session_id"),
+        reason=reason,
+        metadata={
+            "node": "execute_tool",
+            "run_id": get_graph_run_id(data),
+            "checkpoint_id": data["agent_state"].checkpoint_id,
+            "tool_result_present": result is not None,
+        },
+    )
+
+
 def permission_check_node(data: AgentGraphData) -> AgentGraphData:
     """
     PermissionCheck 闂備胶鍘ч幖顐﹀磹婵犳艾纾婚柨婵嗩槸杩?
@@ -1568,23 +1882,80 @@ def permission_check_node(data: AgentGraphData) -> AgentGraphData:
     闂佽崵濮甸崝妤呭窗閺囥垺鍎楁俊銈呮噹閸愨偓闁荤喐鐟ョ€氼剛绮?permission_mode 闂備礁鎲＄划宀勬嚐椤栨稑顕遍柟鐗堟緲缁€?risk_level 闂備礁鎲＄敮鍥磹閺嶎厼钃熼柛銉墮閸欏﹥銇勯弽銊ь暡闁稿骸锕弻娑滅疀鎼淬垻銈板銈嗘煥缁绘﹢鐛鍫▉濡炪們鍨洪崹鎸庝繆?
     """
     state = data["agent_state"]
-    registry = get_registry(data)
     call = data.get("parsed_tool_call")
-    permission_mode = get_permission_mode(data)
 
-    decision = evaluate_permission(
-        call,
-        registry=registry,
-        permission_mode=permission_mode,
-    )
+    data["permission_gate_result"] = None
+    data["permission_gate_error"] = None
+    data["permission_decision"] = None
 
-    if call is not None and not decision.allowed:
-        state.set_waiting_permission(call.call_id)
+    if call is None:
+        return data
 
-    data["agent_state"] = state
-    data["permission_decision"] = decision
+    if not get_permission_gate_enabled(data):
+        return data
 
-    return data
+    try:
+        gate = create_graph_permission_gate(data)
+
+        gate_result = gate.check(
+            call,
+            mode=get_permission_mode(data),
+            session_id=data.get("session_id"),
+            metadata={
+                "node": "permission_check",
+                "run_id": get_graph_run_id(data),
+                "checkpoint_id": state.checkpoint_id,
+            },
+        )
+
+        data["permission_gate_result"] = gate_result
+        data["permission_decision"] = gate_result.decision
+
+        emit_status_event(
+            data,
+            "permission_checked",
+            content=render_permission_gate_result(gate_result),
+            metadata={
+                "node": "permission_check",
+                "tool_name": call.tool_name,
+                "call_id": call.call_id,
+                "decision": gate_result.decision.decision.value,
+                "risk": gate_result.decision.risk.value,
+                "allowed": gate_result.allowed,
+            },
+        )
+
+        if not gate_result.allowed:
+            if hasattr(state, "set_waiting_permission"):
+                state.set_waiting_permission(call.call_id)
+
+            data["agent_state"] = state
+
+        return data
+
+    except Exception as exc:
+        error_text = str(exc)
+
+        data["permission_gate_error"] = error_text
+        data["error"] = error_text
+
+        emit_error_event(
+            data,
+            error_text,
+            error_type=type(exc).__name__,
+            metadata={
+                "node": "permission_check",
+                "tool_name": call.tool_name,
+                "call_id": call.call_id,
+            },
+        )
+
+        if hasattr(state, "set_error"):
+            state.set_error(error_text)
+
+        data["agent_state"] = state
+
+        return data
 
 
 def create_graph_tool_context(data: AgentGraphData) -> ToolExecutionContext:
@@ -1670,49 +2041,20 @@ async def run_tool_from_registry(
 
 
 def add_tool_result_to_agent_state(
-    agent_state: Any,
+    agent_state,
     result: ToolResult,
-) -> None:
+) -> Any:
     """
-    Record a ToolResult on AgentState, with fallbacks for older state APIs.
+    把 ToolResult 写回 AgentState.messages。
+
+    这一步很关键：
+    如果不把 stdout / stderr / exit_code 等内容作为 tool message
+    塞回 AgentState，LLM 下一轮就不知道工具执行结果。
     """
-    if hasattr(agent_state, "add_tool_result"):
-        agent_state.add_tool_result(result)
-        return
-
-    metadata = {
-        "success": result.success,
-        "status": result.status,
-        "duration_ms": result.duration_ms,
-    }
-
-    if hasattr(agent_state, "add_tool_message"):
-        try:
-            agent_state.add_tool_message(
-                result.content,
-                name=result.tool_name,
-                tool_call_id=result.call_id,
-                metadata=metadata,
-            )
-            return
-        except TypeError:
-            pass
-
-    if hasattr(agent_state, "add_message"):
-        try:
-            agent_state.add_message(
-                "tool",
-                result.content,
-                name=result.tool_name,
-                tool_call_id=result.call_id,
-                metadata=metadata,
-            )
-        except TypeError:
-            agent_state.add_message(
-                role="tool",
-                content=result.content,
-                metadata=metadata,
-            )
+    return append_tool_result_to_agent_state(
+        agent_state,
+        result,
+    )
 
 
 def make_tool_error_result(
@@ -1974,6 +2316,160 @@ async def execute_tool_node(data: AgentGraphData) -> dict[str, Any]:
         },
     )
 
+    gate_result = data.get("permission_gate_result")
+
+    if isinstance(gate_result, PermissionGateResult) and not gate_result.allowed:
+        if gate_result.denied:
+            result = make_permission_blocked_tool_result(
+                tool_call,
+                gate_result,
+            )
+
+            data["tool_result"] = result
+            data["has_tool_result"] = True
+            data["error"] = gate_result.decision.reason
+
+            add_tool_result_to_agent_state(
+                agent_state,
+                result,
+            )
+
+            record_graph_permission_execution_result(
+                data,
+                gate_result,
+                executed=False,
+                result=result,
+                reason=gate_result.decision.reason,
+            )
+
+            emit_tool_result_event(
+                data,
+                result,
+                metadata={
+                    "node": "execute_tool",
+                    "tool_name": tool_call.tool_name,
+                    "success": False,
+                    "permission_blocked": True,
+                    "permission_decision": gate_result.decision.decision.value,
+                    "risk": gate_result.decision.risk.value,
+                },
+            )
+
+            emit_status_event(
+                data,
+                "permission_blocked",
+                content=render_permission_gate_result(gate_result),
+                metadata={
+                    "node": "execute_tool",
+                    "tool_name": tool_call.tool_name,
+                    "call_id": tool_call.call_id,
+                    "decision": gate_result.decision.decision.value,
+                    "risk": gate_result.decision.risk.value,
+                },
+            )
+
+            if hasattr(agent_state, "current_tool_call_id"):
+                agent_state.current_tool_call_id = None
+
+            data["agent_state"] = agent_state
+
+            return data
+
+        approval_result = await request_graph_approval(
+            data,
+            gate_result,
+        )
+
+        data["approval_result"] = approval_result
+
+        record_graph_permission_user_decision(
+            data,
+            gate_result,
+            approval_result,
+            reason=(
+                "user responded to approval request"
+                if approval_result is not None
+                else "approval unavailable or dismissed"
+            ),
+        )
+
+        if approval_result is None or not approval_result_allows(approval_result):
+            result = make_permission_blocked_tool_result(
+                tool_call,
+                gate_result,
+            )
+
+            data["tool_result"] = result
+            data["has_tool_result"] = True
+            data["error"] = "user denied permission"
+
+            add_tool_result_to_agent_state(
+                agent_state,
+                result,
+            )
+
+            record_graph_permission_execution_result(
+                data,
+                gate_result,
+                executed=False,
+                result=result,
+                reason="user denied permission",
+            )
+
+            emit_tool_result_event(
+                data,
+                result,
+                metadata={
+                    "node": "execute_tool",
+                    "tool_name": tool_call.tool_name,
+                    "success": False,
+                    "permission_blocked": True,
+                    "permission_decision": gate_result.decision.decision.value,
+                    "risk": gate_result.decision.risk.value,
+                    "user_denied": True,
+                },
+            )
+
+            emit_status_event(
+                data,
+                "permission_denied_by_user",
+                content=f"user denied tool `{tool_call.tool_name}`",
+                metadata={
+                    "node": "execute_tool",
+                    "tool_name": tool_call.tool_name,
+                    "call_id": tool_call.call_id,
+                    "decision": gate_result.decision.decision.value,
+                    "risk": gate_result.decision.risk.value,
+                },
+            )
+
+            if hasattr(agent_state, "current_tool_call_id"):
+                agent_state.current_tool_call_id = None
+
+            data["agent_state"] = agent_state
+
+            return data
+
+        apply_approval_override_if_needed(
+            data,
+            gate_result,
+            approval_result,
+        )
+
+        emit_status_event(
+            data,
+            "permission_approved_by_user",
+            content=f"user approved tool `{tool_call.tool_name}`",
+            metadata={
+                "node": "execute_tool",
+                "tool_name": tool_call.tool_name,
+                "call_id": tool_call.call_id,
+                "decision": gate_result.decision.decision.value,
+                "risk": gate_result.decision.risk.value,
+                "always_allow": approval_result_is_always_allow(approval_result),
+            },
+        )
+
     emit_status_event(
         data,
         "running_tool",
@@ -2024,6 +2520,14 @@ async def execute_tool_node(data: AgentGraphData) -> dict[str, Any]:
             },
         )
 
+        record_graph_permission_execution_result(
+            data,
+            data.get("permission_gate_result"),
+            executed=True,
+            result=result,
+            reason="tool executed",
+        )
+
         if hasattr(agent_state, "current_tool_call_id"):
             agent_state.current_tool_call_id = None
 
@@ -2054,6 +2558,14 @@ async def execute_tool_node(data: AgentGraphData) -> dict[str, Any]:
                 "tool_name": tool_call.tool_name,
                 "success": False,
             },
+        )
+
+        record_graph_permission_execution_result(
+            data,
+            data.get("permission_gate_result"),
+            executed=True,
+            result=result,
+            reason=error_text,
         )
 
         emit_error_event(
@@ -2476,12 +2988,16 @@ class AgentGraphRunner:
         llm_router: Any | None = None,
         event_bus: RuntimeEventBus | None = None,
         emit_events: bool = True,
+        approval_handler: Any | None = None,
+        permission_gate_state: PermissionGateState | None = None,
     ) -> None:
         self.registry = registry or create_default_registry()
         self.config = config or {}
         self.llm_router = llm_router
         self.event_bus = event_bus or get_default_event_bus()
         self.emit_events = emit_events
+        self.approval_handler = approval_handler
+        self.permission_gate_state = permission_gate_state or PermissionGateState()
         self.graph = build_agent_graph()
 
     async def arun(
@@ -2514,6 +3030,8 @@ class AgentGraphRunner:
         initial_state["emit_events"] = self.emit_events
         initial_state["runtime_events"] = []
         initial_state["emitted_tool_call_ids"] = set()
+        initial_state["approval_handler"] = self.approval_handler
+        initial_state["permission_gate_state"] = self.permission_gate_state
 
         result = await self.graph.ainvoke(initial_state)
 
