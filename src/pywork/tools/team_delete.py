@@ -115,14 +115,12 @@ def require_team_id(args: Mapping[str, Any]) -> str:
 def registry_delete_team(
     registry: Any,
     team_id: str,
-) -> Team | None:
+) -> tuple[bool, Team | None]:
     if isinstance(registry, MutableMapping):
         team = registry.pop(team_id, None)
+        return team is not None, team if isinstance(team, Team) else None
 
-        if isinstance(team, Team):
-            return team
-
-        return None
+    existing_before = registry_get_team(registry, team_id)
 
     for method_name in ("delete_team", "remove_team", "unregister_team"):
         method = getattr(registry, method_name, None)
@@ -131,22 +129,23 @@ def registry_delete_team(
             result = method(team_id)
 
             if isinstance(result, Team):
-                return result
+                return True, result
 
-            existing = registry_get_team(registry, team_id)
+            if result is True:
+                return True, existing_before
 
-            if existing is None:
-                return None
+            existing_after = registry_get_team(registry, team_id)
+
+            if existing_before is not None and existing_after is None:
+                return True, existing_before
 
     teams = getattr(registry, "teams", None)
 
     if isinstance(teams, MutableMapping):
         team = teams.pop(team_id, None)
+        return team is not None, team if isinstance(team, Team) else None
 
-        if isinstance(team, Team):
-            return team
-
-    return None
+    return False, None
 
 
 def resolve_current_team(context: ToolExecutionContext) -> Team | None:
@@ -274,11 +273,10 @@ class TeamDeleteTool(BaseTool):
             removed_from_registry = False
 
             if registry is not None:
-                deleted = registry_delete_team(
+                removed_from_registry, deleted_team = registry_delete_team(
                     registry,
                     team_id,
                 )
-                removed_from_registry = deleted is not None
 
             if (
                 optional_bool_arg(args, "clear_current", default=True)

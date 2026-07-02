@@ -35,6 +35,37 @@ from pywork.tui.components.diff.widgets import (
     DiffSummaryBar,
 )
 
+from pywork.tui.components.tasks import (
+    TaskDisplayStatus,
+    TaskProgressPanel,
+    TaskProgressRow,
+    TaskProgressSnapshot,
+    TaskProgressStats,
+    build_task_snapshot,
+    build_task_snapshot_from_manager,
+)
+from pywork.tui.components.agents import (
+    AgentActivityPanel,
+    AgentActivityRow,
+    AgentActivitySnapshot,
+    AgentActivityStats,
+    AgentDisplayStatus,
+    build_agent_snapshot,
+    build_agent_snapshot_from_manager,
+    build_agent_snapshot_from_sources,
+    build_agent_snapshot_from_team,
+)
+
+from pywork.tui.components.teams import (
+    TeamMailboxStats,
+    TeamMemberRow,
+    TeamTaskRow,
+    TeamViewPanel,
+    TeamViewSnapshot,
+    TeamViewStats,
+    build_team_snapshot,
+)
+
 __all__ = [
     "ApprovalChoice",
     "ApprovalDialog",
@@ -58,4 +89,27 @@ __all__ = [
     "DiffBody",
     "DiffPanel",
     "DiffSummaryBar",
+    "TaskDisplayStatus",
+    "TaskProgressPanel",
+    "TaskProgressRow",
+    "TaskProgressSnapshot",
+    "TaskProgressStats",
+    "build_task_snapshot",
+    "build_task_snapshot_from_manager",
+    "AgentActivityPanel",
+    "AgentActivityRow",
+    "AgentActivitySnapshot",
+    "AgentActivityStats",
+    "AgentDisplayStatus",
+    "build_agent_snapshot",
+    "build_agent_snapshot_from_manager",
+    "build_agent_snapshot_from_sources",
+    "build_agent_snapshot_from_team",
+    "TeamMailboxStats",
+    "TeamMemberRow",
+    "TeamTaskRow",
+    "TeamViewPanel",
+    "TeamViewSnapshot",
+    "TeamViewStats",
+    "build_team_snapshot",
 ]

@@ -54,8 +54,9 @@ class FakeTaskManager:
 
     async def create_task(
         self,
+        name=None,
         *,
-        name,
+        spec=None,
         task_type=None,
         payload=None,
         parent_id=None,
@@ -64,17 +65,29 @@ class FakeTaskManager:
         max_retries=0,
         timeout_seconds=None,
         created_by=None,
+        task_id=None,
     ):
-        task_id = f"task_{len(self._records) + 1}"
+        if spec is not None:
+            name = spec.name
+            task_type = spec.task_type
+            payload = spec.payload
+            parent_id = spec.parent_id
+            agent_id = spec.agent_id
+            metadata = spec.metadata
+            max_retries = spec.max_retries
+            timeout_seconds = spec.timeout_seconds
+            created_by = spec.created_by
+
+        record_id = task_id or f"task_{len(self._records) + 1}"
         record = FakeTaskRecord(
-            id=task_id,
-            name=name,
+            id=record_id,
+            name=name or "Task",
             payload=payload or {},
             parent_id=parent_id,
             agent_id=agent_id,
             metadata=metadata or {},
         )
-        self._records[task_id] = record
+        self._records[record_id] = record
         return record
 
     async def register_task(self, task) -> None:

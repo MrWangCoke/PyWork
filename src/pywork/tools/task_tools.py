@@ -436,6 +436,9 @@ def team_task_to_data(task: TeamSharedTask) -> dict[str, Any]:
 
 
 def execution_to_data(execution: Any) -> dict[str, Any]:
+    if isinstance(execution, Mapping):
+        return safe_jsonable(dict(execution))
+
     to_dict = getattr(execution, "to_dict", None)
 
     if callable(to_dict):
@@ -601,7 +604,10 @@ async def create_task_manager_record(
 
     if callable(create_task):
         attempts = [
-            lambda: create_task(spec),
+            lambda: create_task(
+                spec=spec,
+                task_id=str(task_id) if task_id else None,
+            ),
             lambda: create_task(
                 name=spec.name,
                 task_type=spec.task_type,
@@ -612,6 +618,7 @@ async def create_task_manager_record(
                 max_retries=spec.max_retries,
                 timeout_seconds=spec.timeout_seconds,
                 created_by=spec.created_by,
+                task_id=str(task_id) if task_id else None,
             ),
         ]
 
@@ -666,10 +673,13 @@ async def maybe_start_task_manager_record(
 
     if callable(start_task):
         attempts = [
-            lambda: start_task(task),
-            lambda: start_task(task, runner),
-            lambda: start_task(task_id),
-            lambda: start_task(task_id, runner),
+            lambda: start_task(
+                task_id,
+                runner=runner,
+            ),
+            lambda: start_task(
+                task_id,
+            ),
         ]
 
         for attempt in attempts:
@@ -682,10 +692,14 @@ async def maybe_start_task_manager_record(
 
     if callable(run_task):
         attempts = [
-            lambda: run_task(task),
-            lambda: run_task(task, runner),
-            lambda: run_task(task_id),
-            lambda: run_task(task_id, runner),
+            lambda: run_task(
+                record=task,
+                runner=runner,
+            ),
+            lambda: run_task(
+                task_id,
+                runner=runner,
+            ),
         ]
 
         for attempt in attempts:
