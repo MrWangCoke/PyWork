@@ -24,6 +24,43 @@ SHELL_RESULT_KEYS = {
 }
 
 
+class ToolAgentMessage(dict):
+    """
+    Dict-compatible tool message with attribute access.
+
+    AgentState historically stores AgentMessage objects, while some graph
+    tests and OpenAI-style tool flows expect a plain dict message. This small
+    adapter keeps both contracts: isinstance(message, dict) remains true, and
+    code that reads message.role / message.content still works.
+    """
+
+    @property
+    def role(self) -> str:
+        return str(self.get("role", ""))
+
+    @property
+    def content(self) -> str:
+        return str(self.get("content", "") or "")
+
+    @property
+    def name(self) -> str | None:
+        value = self.get("name")
+        return str(value) if value is not None else None
+
+    @property
+    def tool_call_id(self) -> str | None:
+        value = self.get("tool_call_id")
+        return str(value) if value is not None else None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        value = self.get("metadata")
+        return dict(value) if isinstance(value, dict) else {}
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self)
+
+
 def safe_getattr(
     value: Any,
     name: str,
@@ -433,11 +470,13 @@ def tool_result_to_agent_message(
     这个 message 会进入 AgentState.messages，
     后续 build_llm_messages() 会把它发给 LLM。
     """
-    message: dict[str, Any] = {
-        "role": "tool",
-        "name": get_tool_result_name(result),
-        "content": build_tool_result_agent_content(result),
-    }
+    message: dict[str, Any] = ToolAgentMessage(
+        {
+            "role": "tool",
+            "name": get_tool_result_name(result),
+            "content": build_tool_result_agent_content(result),
+        }
+    )
 
     call_id = get_tool_result_call_id(result)
 
@@ -508,6 +547,16 @@ def append_tool_result_to_agent_state(
 
     message = tool_result_to_agent_message(result)
 
+    messages = getattr(
+        agent_state,
+        "messages",
+        None,
+    )
+
+    if isinstance(messages, list):
+        messages.append(message)
+        return agent_state
+
     add_tool_message = getattr(
         agent_state,
         "add_tool_message",
@@ -526,16 +575,6 @@ def append_tool_result_to_agent_state(
                 "source": "tool_result_payload",
             },
         )
-        return agent_state
-
-    messages = getattr(
-        agent_state,
-        "messages",
-        None,
-    )
-
-    if isinstance(messages, list):
-        messages.append(message)
         return agent_state
 
     add_message = getattr(

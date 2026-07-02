@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pywork.runtime.engine import (
     RuntimeEngine,
+    RuntimeEngineConfig,
     RuntimeRunResult,
     RuntimeStatus,
 )
@@ -210,10 +211,22 @@ class RuntimeController:
             registry=registry or self.app_state.tool_registry,
             config=config or self.app_state.config,
             agent_state=None,
+            engine_config=RuntimeEngineConfig(
+                metadata=self.app_state.metadata,
+            ),
             event_bus=self.event_bus,
             emit_events=self.emit_events,
             approval_handler=self.approval_handler,
         )
+
+        engine_runtime_metadata = getattr(
+            self.engine,
+            "runtime_metadata",
+            {},
+        )
+
+        if isinstance(engine_runtime_metadata, dict):
+            self.app_state.metadata.update(engine_runtime_metadata)
 
         self.status: RuntimeControllerStatus = RuntimeControllerStatus.READY
         self._events: list[RuntimeControllerEvent] = []

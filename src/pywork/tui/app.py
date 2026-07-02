@@ -28,6 +28,8 @@ from pywork.tui.components.approval_dialog import (
 from pywork.tui.components.chat_panel import ChatPanel
 from pywork.tui.components.input_box import InputBox, InputSubmitted
 from pywork.tui.components.status_bar import StatusBar
+from pywork.tui.components.tasks import TaskProgressPanel
+from pywork.tui.components.teams import TeamViewPanel
 from pywork.tui.components.tool_log import ToolLog
 
 
@@ -512,10 +514,27 @@ class PyWorkApp(App[None]):
         border: round $accent;
     }
 
-    #tool-log {
+    #side-panel {
         width: 1fr;
         height: 100%;
+    }
+
+    #tool-log {
+        width: 100%;
+        height: 2fr;
         border: round $surface;
+    }
+
+    #task-progress-panel {
+        width: 100%;
+        height: 1fr;
+        min-height: 8;
+    }
+
+    #team-view-panel {
+        width: 100%;
+        height: 1fr;
+        min-height: 7;
     }
 
     #input-box {
@@ -583,13 +602,31 @@ class PyWorkApp(App[None]):
         self.input_box: InputBox | None = None
         self.status_bar: StatusBar | None = None
         self.tool_log: ToolLog | None = None
+        self.task_progress_panel: TaskProgressPanel | None = None
+        self.task_panel_refresh_busy = False
+        self.team_view_panel: TeamViewPanel | None = None
+        self.team_panel_refresh_busy = False
         self.slash_suggestion_index = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-layout"):
             with Horizontal(id="main-area"):
                 yield ChatPanel(id="chat-panel")
-                yield ToolLog(id="tool-log")
+
+                with Vertical(id="side-panel"):
+                    yield ToolLog(id="tool-log")
+                    yield TaskProgressPanel(
+                        id="task-progress-panel",
+                        title="Background Tasks",
+                        limit=8,
+                    )
+                    yield TeamViewPanel(
+                        id="team-view-panel",
+                        title="Team Mailbox",
+                        show_members=False,
+                        show_tasks=False,
+                        show_mailbox=True,
+                    )
 
             yield Static("", id="slash-suggestions")
             yield InputBox(id="input-box")
@@ -609,6 +646,15 @@ class PyWorkApp(App[None]):
         self.input_box = self.query_one("#input-box", InputBox)
         self.status_bar = self.query_one("#status-bar", StatusBar)
         self.tool_log = self.query_one("#tool-log", ToolLog)
+        self.task_progress_panel = self.query_one(
+            "#task-progress-panel",
+            TaskProgressPanel,
+        )
+
+        self.team_view_panel = self.query_one(
+            "#team-view-panel",
+            TeamViewPanel,
+        )
 
         self.runtime_controller = self.create_runtime_controller()
 
@@ -626,6 +672,20 @@ class PyWorkApp(App[None]):
 
         self.tool_log.append_status("RuntimeController connected.")
         self.status_bar.set_idle("ready")
+
+        self.schedule_task_panel_refresh()
+
+        self.set_interval(
+            1.0,
+            self.schedule_task_panel_refresh,
+        )
+
+        self.schedule_team_panel_refresh()
+
+        self.set_interval(
+            1.0,
+            self.schedule_team_panel_refresh,
+        )
 
         with suppress(Exception):
             self.input_box.focus_input()
@@ -723,6 +783,187 @@ class PyWorkApp(App[None]):
             return self.tool_log
 
         return self.query_one("#tool-log", ToolLog)
+
+    def get_task_progress_panel(self) -> TaskProgressPanel:
+        if self.task_progress_panel is not None:
+            return self.task_progress_panel
+
+        return self.query_one("#task-progress-panel", TaskProgressPanel)
+
+    def resolve_runtime_task_manager(self) -> Any | None:
+        if self.runtime_controller is None:
+            return None
+
+        app_state_getter = getattr(self.runtime_controller, "get_app_state", None)
+        app_state = (
+            app_state_getter()
+            if callable(app_state_getter)
+            else getattr(self.runtime_controller, "app_state", None)
+        )
+
+        metadata = getattr(app_state, "metadata", None)
+
+        if isinstance(metadata, dict):
+            task_manager = metadata.get("task_manager")
+
+            if task_manager is not None:
+                return task_manager
+
+            subagent_manager = metadata.get("subagent_manager")
+            task_manager = getattr(subagent_manager, "task_manager", None)
+
+            if task_manager is not None:
+                return task_manager
+
+        task_manager = getattr(app_state, "task_manager", None)
+
+        if task_manager is not None:
+            return task_manager
+
+        engine_getter = getattr(self.runtime_controller, "get_engine", None)
+        engine = (
+            engine_getter()
+            if callable(engine_getter)
+            else getattr(self.runtime_controller, "engine", None)
+        )
+        registry = getattr(engine, "registry", None)
+        get_tool = getattr(registry, "get", None)
+        agent_tool = get_tool("agent") if callable(get_tool) else None
+
+        for runtime_owner in (
+            getattr(agent_tool, "manager", None),
+            getattr(getattr(agent_tool, "_fallback_runtime", None), "manager", None),
+        ):
+            task_manager = getattr(runtime_owner, "task_manager", None)
+
+            if task_manager is not None:
+                return task_manager
+
+        return None
+
+    def get_task_manager_for_panel(self) -> Any | None:
+        return self.resolve_runtime_task_manager()
+
+    def get_team_view_panel(self) -> TeamViewPanel:
+        if self.team_view_panel is not None:
+            return self.team_view_panel
+
+        return self.query_one("#team-view-panel", TeamViewPanel)
+
+    def resolve_runtime_team(self) -> Any | None:
+        """
+        从 RuntimeController 里解析共享 Team。
+
+        顺序：
+        1. controller.team
+        2. controller.app_state.metadata["team"]
+        3. controller.engine.team
+        4. controller.engine.runtime_metadata["team"]
+        5. team_registry 中的第一个 team
+        """
+        controller = self.runtime_controller
+
+        if controller is None:
+            return None
+
+        direct = getattr(controller, "team", None)
+
+        if direct is not None:
+            return direct
+
+        app_state = getattr(controller, "app_state", None)
+        app_metadata = getattr(app_state, "metadata", None)
+
+        if isinstance(app_metadata, dict):
+            team = app_metadata.get("team")
+
+            if team is not None:
+                return team
+
+            team_registry = app_metadata.get("team_registry")
+
+            if isinstance(team_registry, dict):
+                for value in team_registry.values():
+                    if value is not None:
+                        return value
+
+        engine = getattr(controller, "engine", None)
+
+        if engine is None:
+            return None
+
+        direct = getattr(engine, "team", None)
+
+        if direct is not None:
+            return direct
+
+        runtime_metadata = getattr(engine, "runtime_metadata", None)
+
+        if isinstance(runtime_metadata, dict):
+            team = runtime_metadata.get("team")
+
+            if team is not None:
+                return team
+
+            team_registry = runtime_metadata.get("team_registry")
+
+            if isinstance(team_registry, dict):
+                for value in team_registry.values():
+                    if value is not None:
+                        return value
+
+        return None
+
+    def schedule_team_panel_refresh(self) -> None:
+        if self.team_panel_refresh_busy:
+            return
+
+        self.run_worker(
+            self.refresh_team_panel(),
+            name="team-panel-refresh",
+            group="team-panel",
+            exclusive=True,
+        )
+
+    async def refresh_team_panel(self) -> None:
+        self.team_panel_refresh_busy = True
+
+        try:
+            panel = self.get_team_view_panel()
+            team = self.resolve_runtime_team()
+
+            await panel.refresh_from_team(team)
+
+        except Exception as exc:
+            if self.tool_log is not None:
+                self.tool_log.append_error(f"Team panel refresh failed: {exc}")
+
+        finally:
+            self.team_panel_refresh_busy = False
+
+    def schedule_task_panel_refresh(self) -> None:
+        if self.task_panel_refresh_busy:
+            return
+
+        self.run_worker(
+            self.refresh_task_progress_panel(),
+            name="task-progress-panel-refresh",
+            group="task-panel",
+            exclusive=True,
+        )
+
+    async def refresh_task_progress_panel(self) -> None:
+        if self.task_progress_panel is None:
+            return
+
+        self.task_panel_refresh_busy = True
+
+        try:
+            await self.task_progress_panel.refresh_from_task_manager(
+                self.get_task_manager_for_panel()
+            )
+        finally:
+            self.task_panel_refresh_busy = False
 
     def get_slash_suggestions_widget(self) -> Static:
         return self.query_one("#slash-suggestions", Static)

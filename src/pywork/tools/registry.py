@@ -407,6 +407,7 @@ def create_default_registry() -> ToolRegistry:
     from pywork.tools.grep import GrepTool
     from pywork.tools.powershell import PowerShellTool
     from pywork.tools.agent_tool import AgentTool
+    from pywork.tools.coordinator_tool import CoordinatorTool
     from pywork.tools.send_message import SendMessageTool
     from pywork.tools.task_update import TaskUpdateTool
     from pywork.tools.task_tools import (
@@ -438,6 +439,18 @@ def create_default_registry() -> ToolRegistry:
             "operation": "delegate",
             "requires_permission_gate": False,
             "description": "Create, route, run, inspect, and stop SubAgents.",
+        },
+    )
+
+    registry.register(
+        CoordinatorTool(),
+        source="builtin",
+        metadata={
+            "category": "agent",
+            "operation": "coordinate",
+            "requires_permission_gate": False,
+            "requires_runtime_object": "subagent_manager",
+            "description": "Coordinate multiple SubAgent workers in parallel or sequence.",
         },
     )
 

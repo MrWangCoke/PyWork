@@ -438,6 +438,157 @@ FILE_PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+REVIEWER_INTENT_PATTERN = re.compile(
+    (
+        r"(subagent|sub-agent|\u5b50\s*agent|\u5b50\u4ee3\u7406|"
+        r"reviewer|review|code\s*review|\u5ba1\u67e5|\u5ba1\u6838|"
+        r"\u68c0\u67e5\u4ee3\u7801|\u4ee3\u7801\u5ba1\u67e5)"
+    ),
+    re.IGNORECASE,
+)
+
+COORDINATOR_PARALLEL_INTENT_PATTERN = re.compile(
+    r"(\u5e76\u884c|\u5e76\u53d1|\u540c\u65f6|\u4e00\u8d77\u8dd1|\u4e00\u8d77\u6267\u884c|parallel|concurrent|run\s+in\s+parallel)",
+    re.IGNORECASE,
+)
+
+COORDINATOR_TASK_PREFIX_PATTERN = re.compile(
+    r"^\s*(?:[-*\u2022]|\d+[).\u3001]|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+[\u3001.\uff09)])\s*"
+)
+
+
+def split_coordinator_task_lines(text: str) -> list[str]:
+    normalized = text.strip()
+
+    # \u4f18\u5148\u53d6\u5192\u53f7\u540e\u9762\u7684\u4efb\u52a1\u5217\u8868\u3002
+    for marker in ("\uff1a", ":"):
+        if marker in normalized:
+            normalized = normalized.split(marker, 1)[1].strip()
+            break
+
+    pieces = re.split(r"(?:\r?\n|[\uff1b;])+", normalized)
+
+    tasks: list[str] = []
+
+    for piece in pieces:
+        item = COORDINATOR_TASK_PREFIX_PATTERN.sub("", piece).strip()
+
+        if not item:
+            continue
+
+        # \u53bb\u6389\u5e38\u89c1\u5f15\u5bfc\u8bcd\u3002
+        item = re.sub(
+            r"^(\u628a)?(\u8fd9)?(\u4e09\u4e2a|3\u4e2a|\u591a\u4e2a)?\u4efb\u52a1(\u5e76\u884c|\u5e76\u53d1|\u540c\u65f6|\u4e00\u8d77)?(\u8dd1|\u6267\u884c)?",
+            "",
+            item,
+            flags=re.IGNORECASE,
+        ).strip(" \uff1a:\uff0c,\u3002")
+
+        if item:
+            tasks.append(item)
+
+    # \u517c\u5bb9\u5355\u884c\uff1a1.xxx 2.xxx 3.xxx
+    if len(tasks) <= 1:
+        inline_parts = re.split(
+            r"\s+(?=\d+[).\u3001]\s*)",
+            normalized,
+        )
+
+        inline_tasks: list[str] = []
+
+        for part in inline_parts:
+            item = COORDINATOR_TASK_PREFIX_PATTERN.sub("", part).strip()
+
+            if item:
+                inline_tasks.append(item)
+
+        if len(inline_tasks) > len(tasks):
+            tasks = inline_tasks
+
+    return tasks
+
+
+def infer_coordinator_agent_name(task: str) -> str:
+    lowered = task.lower()
+
+    if any(word in lowered for word in ["review", "code review", "\u5ba1\u67e5", "\u5ba1\u6838", "\u4ee3\u7801\u5ba1\u67e5"]):
+        return "reviewer"
+
+    if any(word in lowered for word in ["test", "pytest", "verify", "\u9a8c\u8bc1", "\u6d4b\u8bd5", "\u8fd0\u884c\u6d4b\u8bd5"]):
+        return "verifier"
+
+    if any(word in lowered for word in ["debug", "diagnose", "\u8c03\u8bd5", "\u6392\u67e5", "\u4fee bug", "\u4feebug"]):
+        return "debugger"
+
+    if any(word in lowered for word in ["plan", "planning", "\u89c4\u5212", "\u8ba1\u5212", "\u62c6\u89e3", "\u65b9\u6848"]):
+        return "planner"
+
+    return "general"
+
+
+def make_coordinator_parallel_tool_call(
+    *,
+    user_input: str,
+    tasks: list[str],
+) -> ToolCall:
+    steps = [
+        {
+            "worker_id": f"worker_{index}",
+            "agent_name": infer_coordinator_agent_name(task),
+            "task": task,
+            "metadata": {
+                "source": "deterministic_parallel_route",
+                "worker_index": index,
+            },
+        }
+        for index, task in enumerate(tasks, start=1)
+    ]
+
+    return create_tool_call(
+        tool_name="coordinator",
+        arguments={
+            "action": "run",
+            "strategy": "parallel",
+            "execution_mode": "task",
+            "wait": True,
+            "max_concurrency": len(steps),
+            "steps": steps,
+            "metadata": {
+                "source": "runtime_graph.parallel_intent",
+                "original_user_input": user_input,
+            },
+        },
+        metadata={
+            "source": "deterministic_coordinator_route",
+            "strategy": "parallel",
+            "execution_mode": "task",
+            "worker_count": len(steps),
+        },
+    )
+
+
+def detect_coordinator_parallel_tool_call(
+    data: AgentGraphData,
+) -> ToolCall | None:
+    user_input = str(data.get("user_input", "") or "").strip()
+
+    if not user_input or user_input.startswith("/"):
+        return None
+
+    if not COORDINATOR_PARALLEL_INTENT_PATTERN.search(user_input):
+        return None
+
+    tasks = split_coordinator_task_lines(user_input)
+
+    if len(tasks) < 2:
+        return None
+
+    return make_coordinator_parallel_tool_call(
+        user_input=user_input,
+        tasks=tasks,
+    )
+
+
 DIRECT_FINISH_TOOL_NAMES: set[str] = {
     "file_write",
     "file_edit",
@@ -513,6 +664,123 @@ FILE_READ_MAX_CHARS = 500000
 
 def normalize_workspace_relative_path(path: str) -> str:
     return path.strip().strip("`'\".,，。；;：:").replace("\\", "/")
+
+
+def canonicalize_review_target_path(
+    path: str,
+    *,
+    workspace_path: Path,
+) -> str:
+    """
+    Support the common shorthand src/utils/foo.py for src/pywork/utils/foo.py.
+    """
+    normalized = normalize_workspace_relative_path(path)
+    direct_candidate = (workspace_path / normalized).resolve()
+
+    if (
+        path_inside_workspace(direct_candidate, workspace_path=workspace_path)
+        and direct_candidate.is_file()
+    ):
+        return normalized
+
+    if normalized.startswith("src/utils/"):
+        rewritten = "src/pywork/utils/" + normalized.removeprefix("src/utils/")
+        rewritten_candidate = (workspace_path / rewritten).resolve()
+
+        if (
+            path_inside_workspace(rewritten_candidate, workspace_path=workspace_path)
+            and rewritten_candidate.is_file()
+        ):
+            return rewritten
+
+    return normalized
+
+
+def build_reviewer_agent_task(
+    *,
+    target_path: str,
+    user_input: str,
+) -> str:
+    return f"""
+Review the code file `{target_path}`.
+
+Original user request:
+{user_input}
+
+Instructions:
+- Use the reviewer role.
+- Focus on correctness, maintainability, safety, edge cases, and test coverage.
+- Do not modify files.
+- Do not run shell commands.
+- Read and reason about the target file content before commenting.
+- Mention concrete functions, classes, branches, or edge cases when possible.
+
+Required output format:
+1. Summary
+2. Issues found
+3. Safety and permission concerns
+4. Test coverage gaps
+5. Suggested fixes
+6. Recommended next action
+""".strip()
+
+
+def make_reviewer_agent_tool_call(
+    *,
+    target_path: str,
+    user_input: str,
+) -> ToolCall:
+    return create_tool_call(
+        tool_name="agent",
+        arguments={
+            "action": "run",
+            "agent_name": "reviewer",
+            "task": build_reviewer_agent_task(
+                target_path=target_path,
+                user_input=user_input,
+            ),
+            "metadata": {
+                "review_target_path": target_path,
+                "review_original_request": user_input,
+                "deterministic_route": "reviewer_file_review",
+            },
+        },
+        metadata={
+            "source": "deterministic_reviewer_route",
+            "review_target_path": target_path,
+            "user_input": user_input,
+        },
+    )
+
+
+def detect_reviewer_subagent_tool_call(data: AgentGraphData) -> ToolCall | None:
+    user_input = str(data.get("user_input", "") or "").strip()
+
+    if not user_input or user_input.startswith("/"):
+        return None
+
+    if not REVIEWER_INTENT_PATTERN.search(user_input):
+        return None
+
+    path_match = FILE_PATH_PATTERN.search(user_input)
+
+    if path_match is None:
+        return None
+
+    workspace_path = Path(get_workspace_path(data)).expanduser().resolve()
+    raw_path = path_match.group("path")
+    target_path = canonicalize_review_target_path(
+        raw_path,
+        workspace_path=workspace_path,
+    )
+
+    if Path(target_path).suffix.lower() != ".py":
+        return None
+
+    return make_reviewer_agent_tool_call(
+        target_path=target_path,
+        user_input=user_input,
+    )
 
 
 def is_text_file_path(path: str) -> bool:
@@ -778,6 +1046,9 @@ def graph_has_llm_config(config: dict[str, Any]) -> bool:
 
 
 def message_role_value(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("role", ""))
+
     role = getattr(message, "role", "")
 
     if isinstance(role, MessageRole):
@@ -796,8 +1067,13 @@ def agent_message_to_llm_message(message: Any) -> AnyMessage | None:
     results wrapped as user messages.
     """
     role = message_role_value(message)
-    content = str(getattr(message, "content", "") or "")
-    metadata = dict(getattr(message, "metadata", {}) or {})
+
+    if isinstance(message, dict):
+        content = str(message.get("content", "") or "")
+        metadata = dict(message.get("metadata", {}) or {})
+    else:
+        content = str(getattr(message, "content", "") or "")
+        metadata = dict(getattr(message, "metadata", {}) or {})
 
     if role == "system":
         return create_system_message(
@@ -1040,9 +1316,8 @@ async def call_llm_node(data: AgentGraphData) -> AgentGraphData:
         Falls back to mock_call_llm_output() which generates deterministic
         responses for /tool shortcuts and echoes user input.
 
-    Before calling the LLM, checks for deterministic file-read intents
-    (detect_next_file_tool_call) to skip the LLM call entirely when the
-    user's intent is unambiguous (e.g. "read README.md").
+    Before calling the LLM, checks for deterministic reviewer and file-read
+    intents to skip the LLM call when the user's intent is unambiguous.
     """
     agent_state = data["agent_state"]
 
@@ -1063,6 +1338,54 @@ async def call_llm_node(data: AgentGraphData) -> AgentGraphData:
     data["llm_error"] = None
 
     if not data.get("awaiting_final_response"):
+        coordinator_tool_call = detect_coordinator_parallel_tool_call(data)
+
+        if coordinator_tool_call is not None:
+            data["llm_output"] = json.dumps(
+                {
+                    "tool_name": coordinator_tool_call.tool_name,
+                    "arguments": coordinator_tool_call.arguments,
+                },
+                ensure_ascii=False,
+            )
+
+            emit_status_event(
+                data,
+                "tool_route",
+                content="deterministic coordinator parallel route selected",
+                metadata={
+                    "node": "call_llm",
+                    "tool_name": coordinator_tool_call.tool_name,
+                    "arguments": coordinator_tool_call.arguments,
+                },
+            )
+
+            return data
+
+        reviewer_tool_call = detect_reviewer_subagent_tool_call(data)
+
+        if reviewer_tool_call is not None:
+            data["llm_output"] = json.dumps(
+                {
+                    "tool_name": reviewer_tool_call.tool_name,
+                    "arguments": reviewer_tool_call.arguments,
+                },
+                ensure_ascii=False,
+            )
+
+            emit_status_event(
+                data,
+                "tool_route",
+                content="deterministic reviewer route selected",
+                metadata={
+                    "node": "call_llm",
+                    "tool_name": reviewer_tool_call.tool_name,
+                    "arguments": reviewer_tool_call.arguments,
+                },
+            )
+
+            return data
+
         file_tool_call = detect_next_file_tool_call(data)
 
         if file_tool_call is not None:
@@ -1721,6 +2044,15 @@ def get_permission_gate_state(data: AgentGraphData) -> PermissionGateState:
     return state
 
 
+def get_registered_tool_risk(data: AgentGraphData, tool_name: str) -> Any | None:
+    tool = get_registry(data).get(tool_name)
+
+    if tool is None or not hasattr(tool, "get_risk_level"):
+        return None
+
+    return tool.get_risk_level()
+
+
 async def maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -2017,6 +2349,7 @@ def permission_check_node(data: AgentGraphData) -> AgentGraphData:
         gate_result = gate.check(
             call,
             mode=get_permission_mode(data),
+            risk=get_registered_tool_risk(data, call.tool_name),
             session_id=data.get("session_id"),
             metadata={
                 "node": "permission_check",
@@ -2078,12 +2411,42 @@ def permission_check_node(data: AgentGraphData) -> AgentGraphData:
 def create_graph_tool_context(data: AgentGraphData) -> ToolExecutionContext:
     """
     Create the ToolExecutionContext used by registry-backed graph tools.
+
+    这里会把 Runtime 共享对象注入给工具：
+    - task_manager
+    - subagent_manager
+    - mailbox
+    - team / team_registry
+    - tool_registry / registry
+    - agent_state
+    - run_id / session_id
     """
     signature = inspect.signature(ToolExecutionContext)
     parameters = signature.parameters
 
     workspace_path = Path(get_workspace_path(data)).expanduser().resolve()
     project_root = Path(get_project_root(data)).expanduser().resolve()
+
+    registry = get_registry(data)
+    config = get_config(data)
+
+    runtime_metadata = dict(data.get("metadata") or {})
+
+    runtime_metadata.update(
+        {
+            "source": "runtime_graph.execute_tool_node",
+            "permission_mode": get_permission_mode(data),
+            "checkpoint_id": data["agent_state"].checkpoint_id,
+            "run_id": get_graph_run_id(data),
+            "session_id": data.get("session_id"),
+            "agent_state": data["agent_state"],
+            "tool_registry": registry,
+            "registry": registry,
+            "tool_definitions": get_graph_tool_definitions(data),
+            "event_bus": get_graph_event_bus(data),
+            "config": config,
+        }
+    )
 
     kwargs: dict[str, Any] = {}
 
@@ -2093,18 +2456,17 @@ def create_graph_tool_context(data: AgentGraphData) -> ToolExecutionContext:
     if "project_root" in parameters:
         kwargs["project_root"] = str(project_root)
 
-    if "config" in parameters:
-        kwargs["config"] = data.get("config") or {}
-
-    if "metadata" in parameters:
-        kwargs["metadata"] = {
-            "source": "runtime_graph.execute_tool_node",
-            "permission_mode": get_permission_mode(data),
-            "checkpoint_id": data["agent_state"].checkpoint_id,
-        }
-
     if "permission_mode" in parameters:
         kwargs["permission_mode"] = get_permission_mode(data)
+
+    if "session_id" in parameters:
+        session_id = data.get("session_id")
+
+        if session_id is not None:
+            kwargs["session_id"] = str(session_id)
+
+    if "metadata" in parameters:
+        kwargs["metadata"] = runtime_metadata
 
     return ToolExecutionContext(**kwargs)
 
@@ -3208,6 +3570,7 @@ class AgentGraphRunner:
         emit_events: bool = True,
         approval_handler: Any | None = None,
         permission_gate_state: PermissionGateState | None = None,
+        runtime_objects: dict[str, Any] | None = None,
     ) -> None:
         self.registry = registry or create_default_registry()
         self.config = config or {}
@@ -3216,6 +3579,7 @@ class AgentGraphRunner:
         self.emit_events = emit_events
         self.approval_handler = approval_handler
         self.permission_gate_state = permission_gate_state or PermissionGateState()
+        self.runtime_objects = dict(runtime_objects or {})
         self.graph = build_agent_graph()
 
     async def arun(
@@ -3225,18 +3589,21 @@ class AgentGraphRunner:
         agent_state: AgentState | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AgentState:
-        metadata = metadata or {}
+        run_metadata = {
+            **self.runtime_objects,
+            **(metadata or {}),
+        }
 
         initial_state = create_default_agent_graph_state(
             user_input=user_input,
             registry=self.registry,
             config=self.config,
             agent_state=agent_state,
-            metadata=metadata,
+            metadata=run_metadata,
         )
 
-        run_id = str(metadata.get("run_id") or new_run_id())
-        session_id = metadata.get("session_id")
+        run_id = str(run_metadata.get("run_id") or new_run_id())
+        session_id = run_metadata.get("session_id")
         
         initial_state["registry"] = self.registry
         initial_state["config"] = self.config

@@ -105,6 +105,10 @@ class RosterMember:
         return self.teammate.name
 
     @property
+    def mailbox(self) -> AgentMailbox:
+        return self.teammate.mailbox
+
+    @property
     def is_active(self) -> bool:
         return self.status == RosterMemberStatus.ACTIVE
 

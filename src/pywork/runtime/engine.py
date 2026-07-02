@@ -12,6 +12,7 @@ from uuid import uuid4
 from pywork.permission.session_overrides import PermissionGateState
 from pywork.runtime.events import RuntimeEventBus, get_default_event_bus
 from pywork.runtime.graph import AgentGraphRunner
+from pywork.runtime.shared_objects import ensure_runtime_shared_objects
 from pywork.runtime.state import AgentState, AgentStatus, create_agent_state
 from pywork.tools.registry import ToolRegistry, create_default_registry
 
@@ -193,6 +194,25 @@ class RuntimeEngine:
         self.approval_handler = approval_handler
         self.permission_gate_state = permission_gate_state or PermissionGateState()
 
+        workspace_path = (
+            self.config.get("workspace", {}).get("path")
+            if isinstance(self.config.get("workspace"), dict)
+            else None
+        ) or "."
+
+        self.runtime_metadata = ensure_runtime_shared_objects(
+            dict(self.engine_config.metadata or {}),
+            registry=self.registry,
+            workspace_path=workspace_path,
+            config=self.config,
+        )
+
+        self.subagent_manager = self.runtime_metadata["subagent_manager"]
+        self.task_manager = self.runtime_metadata["task_manager"]
+        self.mailbox = self.runtime_metadata["mailbox"]
+        self.team = self.runtime_metadata["team"]
+        self.team_registry = self.runtime_metadata["team_registry"]
+
         self.agent_state = agent_state or create_agent_state(
             system_prompt=None,
             max_iterations=int(
@@ -201,7 +221,7 @@ class RuntimeEngine:
                     self.engine_config.max_iterations,
                 )
             ),
-            metadata=self.engine_config.metadata,
+            metadata=self.runtime_metadata,
         )
 
         self.graph_runner = AgentGraphRunner(
@@ -211,6 +231,7 @@ class RuntimeEngine:
             emit_events=self.emit_events,
             approval_handler=self.approval_handler,
             permission_gate_state=self.permission_gate_state,
+            runtime_objects=self.runtime_metadata,
         )
 
         self.status: RuntimeStatus = RuntimeStatus.IDLE
@@ -395,7 +416,7 @@ class RuntimeEngine:
                             self.engine_config.max_iterations,
                         )
                     ),
-                    metadata=self.engine_config.metadata,
+                    metadata=self.runtime_metadata,
                 )
 
             self._set_status(
@@ -492,11 +513,16 @@ class RuntimeEngine:
         )
 
         try:
+            run_metadata = {
+                **self.runtime_metadata,
+                **(metadata or {}),
+            }
+
             task = asyncio.create_task(
                 self.graph_runner.arun(
                     user_input,
                     agent_state=self.agent_state,
-                    metadata=metadata or {},
+                    metadata=run_metadata,
                 )
             )
 

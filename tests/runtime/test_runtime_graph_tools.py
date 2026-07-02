@@ -10,6 +10,7 @@ from pywork.runtime.graph import (
     append_observation_node,
     build_llm_messages,
     create_default_agent_graph_state,
+    detect_reviewer_subagent_tool_call,
     execute_tool_node,
     extract_glob_file_read_paths,
 )
@@ -171,6 +172,31 @@ async def test_agent_graph_routes_known_file_read_requests_to_file_read() -> Non
     assert state.tool_calls[0].arguments["path"] == "README.md"
     assert state.get_last_message() is not None
     assert state.get_last_message().role == "assistant"
+
+
+def test_detect_reviewer_subagent_routes_src_utils_shorthand(tmp_path) -> None:
+    target = tmp_path / "src" / "pywork" / "utils" / "diff.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def diff():\n    return 'ok'\n", encoding="utf-8")
+
+    data = create_default_agent_graph_state(
+        user_input="用 SubAgent 审查 src/utils/diff.py",
+        config={
+            "workspace": {
+                "path": str(tmp_path),
+                "project_root": str(tmp_path),
+            },
+        },
+    )
+
+    tool_call = detect_reviewer_subagent_tool_call(data)
+
+    assert tool_call is not None
+    assert tool_call.tool_name == "agent"
+    assert tool_call.arguments["action"] == "run"
+    assert tool_call.arguments["agent_name"] == "reviewer"
+    assert tool_call.arguments["metadata"]["review_target_path"] == "src/pywork/utils/diff.py"
+    assert "Review the code file `src/pywork/utils/diff.py`." in tool_call.arguments["task"]
 
 
 @pytest.mark.asyncio
