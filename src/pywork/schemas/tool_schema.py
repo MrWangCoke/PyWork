@@ -285,12 +285,15 @@ class ToolResult(BaseModel):
 
 
 def create_tool_call(
-    *,
-    tool_name: str,
+    tool_name: str | None = None,
     arguments: dict[str, Any] | None = None,
+    *,
     risk_level: ToolRiskLevel | str = ToolRiskLevel.LOW,
     metadata: dict[str, Any] | None = None,
 ) -> ToolCall:
+    if tool_name is None:
+        raise TypeError("tool_name is required")
+
     return ToolCall(
         tool_name=tool_name,
         arguments=arguments or {},

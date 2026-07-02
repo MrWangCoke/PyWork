@@ -408,6 +408,16 @@ def create_default_registry() -> ToolRegistry:
     from pywork.tools.powershell import PowerShellTool
     from pywork.tools.agent_tool import AgentTool
     from pywork.tools.send_message import SendMessageTool
+    from pywork.tools.task_update import TaskUpdateTool
+    from pywork.tools.task_tools import (
+        TaskCreateTool,
+        TaskListTool,
+        TaskOutputTool,
+        TaskStopTool,
+    )
+    from pywork.tools.team_create import TeamCreateTool
+    from pywork.tools.team_delete import TeamDeleteTool
+
 
     registry = ToolRegistry()
 
@@ -440,6 +450,69 @@ def create_default_registry() -> ToolRegistry:
         },
     )
     
+    registry.register(
+        TaskUpdateTool(),
+        metadata={
+            "category": "task",
+            "capability": "update_status",
+            "requires_runtime_object": "task_manager_or_team",
+        },
+    )
+
+    registry.register(
+        TaskCreateTool(),
+        metadata={
+            "category": "task",
+            "capability": "create",
+            "requires_runtime_object": "task_manager_or_team_or_subagent_manager",
+        },
+    )
+
+    registry.register(
+        TaskListTool(),
+        metadata={
+            "category": "task",
+            "capability": "list",
+            "requires_runtime_object": "task_manager_or_team",
+        },
+    )
+
+    registry.register(
+        TaskOutputTool(),
+        metadata={
+            "category": "task",
+            "capability": "output",
+            "requires_runtime_object": "task_manager_or_team",
+        },
+    )
+
+    registry.register(
+        TaskStopTool(),
+        metadata={
+            "category": "task",
+            "capability": "stop",
+            "requires_runtime_object": "task_manager_or_team_or_subagent_manager",
+        },
+    )
+
+    registry.register(
+        TeamCreateTool(),
+        metadata={
+            "category": "team",
+            "capability": "create",
+            "requires_runtime_object": "team_registry",
+        },
+    )
+
+    registry.register(
+        TeamDeleteTool(),
+        metadata={
+            "category": "team",
+            "capability": "delete",
+            "requires_runtime_object": "team_registry",
+        },
+    )
+
     registry.register(
         FileReadTool(),
         source="builtin",

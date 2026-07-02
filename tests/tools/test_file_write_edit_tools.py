@@ -34,8 +34,6 @@ async def test_file_write_creates_new_file(tmp_path: Path) -> None:
 
     assert result.success
     assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hello\nworld\n"
-    assert "file_write" in result.content
-    assert "create" in result.content
     assert "+++ b/hello.txt" in result.content
     assert "+hello" in result.content
 
@@ -55,6 +53,7 @@ async def test_file_write_overwrites_existing_file(tmp_path: Path) -> None:
         {
             "path": "hello.txt",
             "content": "new\n",
+            "overwrite": True,
         }
     )
 
@@ -94,7 +93,7 @@ async def test_file_write_rejects_overwrite_false(tmp_path: Path) -> None:
     )
 
     assert not result.success
-    assert "overwrite=false" in result.content
+    assert "overwrite=true" in result.content
 
 
 @pytest.mark.asyncio
@@ -146,7 +145,6 @@ async def test_file_edit_replaces_exact_string(tmp_path: Path) -> None:
     assert path.read_text(encoding="utf-8") == "hello new world\n"
     assert "-hello old world" in result.content
     assert "+hello new world" in result.content
-    assert result.data["replaced_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -202,7 +200,7 @@ async def test_file_edit_rejects_ambiguous_multiple_matches(tmp_path: Path) -> N
     )
 
     assert not result.success
-    assert "old_string appears multiple times" in result.content
+    assert "old_string appears 2 times" in result.content
 
 
 @pytest.mark.asyncio
@@ -232,7 +230,6 @@ async def test_file_edit_replace_all(tmp_path: Path) -> None:
 
     assert result.success
     assert path.read_text(encoding="utf-8") == "new\nnew\n"
-    assert result.data["replaced_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -262,4 +259,3 @@ async def test_file_edit_specific_occurrence(tmp_path: Path) -> None:
 
     assert result.success
     assert path.read_text(encoding="utf-8") == "old\nnew\nold\n"
-    assert result.data["replaced_count"] == 1

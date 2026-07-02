@@ -94,9 +94,12 @@ def make_result(
     data: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> ToolResult:
+    from pywork.schemas.tool_schema import ToolResultStatus
+
     return ToolResult(
         call_id=get_call_id(call),
         tool_name=tool_name,
+        status=ToolResultStatus.SUCCESS if success else ToolResultStatus.ERROR,
         success=success,
         content=content,
         data=data or {},
@@ -127,6 +130,10 @@ def resolve_mailbox(context: ToolExecutionContext) -> AgentMailbox:
     - context.metadata["swarm"].team.mailbox
     - context.metadata["teammate"].mailbox
     - context.metadata["agent"].mailbox
+
+    注意：
+    这里不要自动 create_agent_mailbox()。
+    send_message 必须使用运行时共享 mailbox，否则消息会进入孤立邮箱。
     """
 
     metadata = context_metadata(context)
@@ -168,6 +175,42 @@ def resolve_mailbox(context: ToolExecutionContext) -> AgentMailbox:
         "or a team/swarm/teammate object with mailbox."
     )
 
+def has_message_runtime(context: ToolExecutionContext) -> bool:
+    metadata = context_metadata(context)
+
+    mailbox = metadata.get("mailbox")
+
+    if isinstance(mailbox, AgentMailbox):
+        return True
+
+    team = metadata.get("team")
+
+    if team is not None and object_has_attr(team, "mailbox"):
+        team_mailbox = getattr(team, "mailbox")
+
+        if isinstance(team_mailbox, AgentMailbox):
+            return True
+
+    swarm = metadata.get("swarm")
+
+    if swarm is not None and object_has_attr(swarm, "team"):
+        swarm_team = getattr(swarm, "team")
+
+        if swarm_team is not None and object_has_attr(swarm_team, "mailbox"):
+            swarm_mailbox = getattr(swarm_team, "mailbox")
+
+            if isinstance(swarm_mailbox, AgentMailbox):
+                return True
+
+    teammate = metadata.get("teammate") or metadata.get("agent")
+
+    if teammate is not None and object_has_attr(teammate, "mailbox"):
+        teammate_mailbox = getattr(teammate, "mailbox")
+
+        if isinstance(teammate_mailbox, AgentMailbox):
+            return True
+
+    return False
 
 def resolve_team(context: ToolExecutionContext) -> Any | None:
     metadata = context_metadata(context)
@@ -485,6 +528,24 @@ class SendMessageTool(BaseTool):
     ) -> ToolResult:
         args = get_call_args(call)
         action = normalize_action(args.get("action"))
+
+        if not has_message_runtime(context):
+            error = (
+                "send_message requires AgentMailbox in context.metadata['mailbox'], "
+                "or a team/swarm/teammate object with mailbox."
+            )
+
+            return make_result(
+                call,
+                tool_name=self.name,
+                success=False,
+                content=f"send_message failed: {error}",
+                data={
+                    "action": action.value,
+                    "error_type": "SendMessageRuntimeMissingError",
+                },
+                error=error,
+            )
 
         try:
             if action == SendMessageAction.SEND:
@@ -864,6 +925,7 @@ __all__ = [
     "SendMessageRuntimeMissingError",
     "SendMessageTool",
     "SendMessageToolError",
+    "has_message_runtime",
     "normalize_action",
     "resolve_mailbox",
     "resolve_sender_id",
