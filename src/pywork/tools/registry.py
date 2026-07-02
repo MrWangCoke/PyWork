@@ -406,6 +406,8 @@ def create_default_registry() -> ToolRegistry:
     from pywork.tools.glob import GlobTool
     from pywork.tools.grep import GrepTool
     from pywork.tools.powershell import PowerShellTool
+    from pywork.tools.agent_tool import AgentTool
+    from pywork.tools.send_message import SendMessageTool
 
     registry = ToolRegistry()
 
@@ -418,6 +420,26 @@ def create_default_registry() -> ToolRegistry:
         },
     )
 
+    registry.register(
+        AgentTool(),
+        source="builtin",
+        metadata={
+            "category": "agent",
+            "operation": "delegate",
+            "requires_permission_gate": False,
+            "description": "Create, route, run, inspect, and stop SubAgents.",
+        },
+    )
+
+    registry.register(
+        SendMessageTool(),
+        metadata={
+            "category": "agent",
+            "capability": "message",
+            "requires_runtime_object": "mailbox",
+        },
+    )
+    
     registry.register(
         FileReadTool(),
         source="builtin",

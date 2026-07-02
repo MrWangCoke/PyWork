@@ -127,7 +127,21 @@ class MessageBubble(Static):
         else:
             text.append(content)
 
+        model_label = self.get_model_label()
+
+        if role == "assistant" and model_label:
+            text.append("\n\n")
+            text.append(f"model: {model_label}", style="dim")
+
         return text
+
+    def get_model_label(self) -> str:
+        model_label = self.message.metadata.get("model")
+
+        if not isinstance(model_label, str):
+            return ""
+
+        return model_label.strip()
 
 
 class ChatPanel(Widget):

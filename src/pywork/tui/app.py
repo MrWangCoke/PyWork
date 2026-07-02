@@ -1085,7 +1085,12 @@ class PyWorkApp(App[None]):
             if result is not None:
                 if result.success:
                     if result.output and self.chat_panel is not None:
-                        self.chat_panel.append_assistant_message(result.output)
+                        self.chat_panel.append_assistant_message(
+                            result.output,
+                            metadata={
+                                "model": self.get_configured_model_label(),
+                            },
+                        )
 
                     if result.output and self.status_bar is not None:
                         self.status_bar.add_token_usage(
