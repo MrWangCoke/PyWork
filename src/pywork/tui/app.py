@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, ListItem, ListView, Static
+from textual.widgets import Input, Label, ListItem, ListView, Static, TextArea
 
 from pywork.runtime.controller import RuntimeController
 from pywork.runtime.events import RuntimeEvent
@@ -136,6 +137,7 @@ def normalize_slash_command(text: str) -> str:
 class CommandsDialog(ModalScreen[str | None]):
     BINDINGS = [
         Binding("escape", "close", "Close", priority=True),
+        Binding("ctrl+c", "copy_text", "Copy", priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -200,27 +202,41 @@ class CommandsDialog(ModalScreen[str | None]):
         self.query_one("#command-search", Input).focus()
 
     def command_matches(self, command: SlashCommand, query: str) -> bool:
-        if not query:
+        normalized_query = query.strip().lower().lstrip("/")
+
+        if not normalized_query:
             return True
 
         haystack = " ".join(
             [
+                self.display_command_name(command),
                 command.name,
                 command.usage,
                 command.description,
                 " ".join(command.aliases),
+                " ".join(alias.lstrip("/") for alias in command.aliases),
             ]
         ).lower()
 
-        return query.lower() in haystack
+        return normalized_query in haystack
 
     def render_command_row(self, command: SlashCommand) -> str:
         aliases = ""
 
         if command.aliases:
-            aliases = "  " + ", ".join(command.aliases)
+            aliases = "  " + ", ".join(
+                alias.lstrip("/")
+                for alias in command.aliases
+            )
 
-        return f"{command.usage:<16} {command.description}{aliases}"
+        return (
+            f"{self.display_command_name(command):<16} "
+            f"{command.description}{aliases}"
+        )
+
+    @staticmethod
+    def display_command_name(command: SlashCommand) -> str:
+        return command.name.lstrip("/")
 
     async def refresh_commands(self, query: str) -> None:
         self.filtered_commands = [
@@ -283,14 +299,14 @@ class CommandsDialog(ModalScreen[str | None]):
             event.prevent_default()
             event.stop()
             current = list_view.index or 0
-            list_view.index = min(current + 1, len(self.filtered_commands) - 1)
+            list_view.index = (current + 1) % len(self.filtered_commands)
             return
 
         if key in {"up", "ctrl+p"} and self.filtered_commands:
             event.prevent_default()
             event.stop()
             current = list_view.index or 0
-            list_view.index = max(current - 1, 0)
+            list_view.index = (current - 1) % len(self.filtered_commands)
             return
 
     def action_close(self) -> None:
@@ -483,6 +499,7 @@ class PyWorkApp(App[None]):
 
     #main-layout {
         height: 1fr;
+        layers: base overlay;
     }
 
     #main-area {
@@ -505,6 +522,23 @@ class PyWorkApp(App[None]):
         height: 12;
     }
 
+    #slash-suggestions {
+        position: absolute;
+        layer: overlay;
+        width: 100%;
+        height: 1;
+        max-height: 10;
+        display: none;
+        background: #1f1f1f;
+        border-left: solid #5aa7ff;
+        padding: 0 1;
+        margin: 0 1;
+    }
+
+    #slash-suggestions.visible {
+        display: block;
+    }
+
     #status-bar {
         dock: bottom;
         height: 2;
@@ -512,6 +546,7 @@ class PyWorkApp(App[None]):
     """
 
     BINDINGS = [
+        Binding("ctrl+c", "copy_selected_text", "Copy", priority=True),
         Binding("ctrl+l", "clear_chat", "Clear Chat", priority=True),
         Binding("ctrl+r", "reset_tokens", "Reset Tokens", priority=True),
         Binding("ctrl+s", "show_status", "Show Status", priority=True),
@@ -548,6 +583,7 @@ class PyWorkApp(App[None]):
         self.input_box: InputBox | None = None
         self.status_bar: StatusBar | None = None
         self.tool_log: ToolLog | None = None
+        self.slash_suggestion_index = 0
 
     def compose(self) -> ComposeResult:
         with Vertical(id="main-layout"):
@@ -555,6 +591,7 @@ class PyWorkApp(App[None]):
                 yield ChatPanel(id="chat-panel")
                 yield ToolLog(id="tool-log")
 
+            yield Static("", id="slash-suggestions")
             yield InputBox(id="input-box")
 
         yield StatusBar(
@@ -687,6 +724,9 @@ class PyWorkApp(App[None]):
 
         return self.query_one("#tool-log", ToolLog)
 
+    def get_slash_suggestions_widget(self) -> Static:
+        return self.query_one("#slash-suggestions", Static)
+
     def get_model_name(self) -> str:
         return self.get_configured_model_label()
 
@@ -755,6 +795,133 @@ class PyWorkApp(App[None]):
 
     def get_slash_commands(self) -> list[SlashCommand]:
         return get_builtin_slash_commands()
+
+    def get_matching_slash_commands(
+        self,
+        text: str,
+        *,
+        limit: int = 9,
+    ) -> list[SlashCommand]:
+        raw = text.strip()
+
+        if not raw.startswith("/"):
+            return []
+
+        query = raw[1:].lower()
+
+        if " " in query:
+            query = query.split(maxsplit=1)[0]
+
+        matches: list[SlashCommand] = []
+
+        for command in self.get_slash_commands():
+            names = [
+                command.name.lstrip("/"),
+                command.usage.lstrip("/"),
+                *[alias.lstrip("/") for alias in command.aliases],
+            ]
+            haystack = " ".join([*names, command.description]).lower()
+
+            if not query or query in haystack:
+                matches.append(command)
+
+            if len(matches) >= limit:
+                break
+
+        return matches
+
+    def render_slash_suggestions(self, matches: list[SlashCommand]) -> Text:
+        rendered = Text()
+
+        for index, command in enumerate(matches):
+            style = "black on #f4b183" if index == self.slash_suggestion_index else ""
+            rendered.append(f"{command.name:<14} {command.description}", style=style)
+
+            if index < len(matches) - 1:
+                rendered.append("\n")
+
+        return rendered
+
+    def hide_slash_suggestions(self) -> None:
+        if not self.is_mounted:
+            return
+
+        suggestions = self.get_slash_suggestions_widget()
+        suggestions.update("")
+        suggestions.remove_class("visible")
+        self.slash_suggestion_index = 0
+
+    def is_slash_suggestions_visible(self) -> bool:
+        if not self.is_mounted:
+            return False
+
+        return self.get_slash_suggestions_widget().has_class("visible")
+
+    def position_slash_suggestions(self, match_count: int) -> None:
+        suggestions = self.get_slash_suggestions_widget()
+        input_box = self.get_input_box()
+        height = max(1, min(match_count, 9))
+        y = max(0, input_box.region.y - height)
+
+        suggestions.styles.height = height
+        suggestions.styles.offset = (0, y)
+
+    def update_slash_suggestions(self, text: str) -> None:
+        if not self.is_mounted:
+            return
+
+        matches = self.get_matching_slash_commands(text)
+
+        if not matches:
+            self.hide_slash_suggestions()
+            return
+
+        self.slash_suggestion_index = min(
+            self.slash_suggestion_index,
+            len(matches) - 1,
+        )
+        suggestions = self.get_slash_suggestions_widget()
+        self.position_slash_suggestions(len(matches))
+        suggestions.update(self.render_slash_suggestions(matches))
+        suggestions.add_class("visible")
+
+    @on(TextArea.Changed, "#prompt-input")
+    def on_prompt_input_changed(self, event: TextArea.Changed) -> None:
+        self.update_slash_suggestions(str(event.text_area.text))
+
+    def execute_selected_slash_suggestion(self, text: str) -> bool:
+        matches = self.get_matching_slash_commands(text)
+
+        if not matches:
+            return False
+
+        index = min(self.slash_suggestion_index, len(matches) - 1)
+        command = matches[index]
+
+        self.hide_slash_suggestions()
+        self.handle_slash_command(command.usage)
+        return True
+
+    def is_known_slash_command_text(self, text: str) -> bool:
+        command_text = normalize_slash_command(text)
+
+        if not command_text.startswith("/"):
+            return False
+
+        for command in self.get_slash_commands():
+            values = {
+                normalize_slash_command(command.name),
+                normalize_slash_command(command.usage),
+                *[
+                    normalize_slash_command(alias)
+                    for alias in command.aliases
+                ],
+            }
+
+            if command_text in values:
+                return True
+
+        return False
 
     def render_help_text(self) -> str:
         lines: list[str] = [
@@ -857,6 +1024,15 @@ class PyWorkApp(App[None]):
 
         if not user_text:
             return
+
+        if (
+            user_text.startswith("/")
+            and not self.is_known_slash_command_text(user_text)
+            and self.execute_selected_slash_suggestion(user_text)
+        ):
+            return
+
+        self.hide_slash_suggestions()
 
         if self.runtime_busy:
             if self.chat_panel is not None:
@@ -1029,8 +1205,54 @@ class PyWorkApp(App[None]):
 
         self.handle_slash_command(command_text)
 
+    def get_selected_text_for_copy(self) -> str:
+        screen = self.screen
+
+        if hasattr(screen, "get_selected_text"):
+            selected_text = screen.get_selected_text()
+
+            if selected_text:
+                return selected_text
+
+        focused = self.focused
+        selected_text = getattr(focused, "selected_text", "")
+
+        if isinstance(selected_text, str) and selected_text:
+            return selected_text
+
+        return ""
+
+    def action_copy_selected_text(self) -> None:
+        selected_text = self.get_selected_text_for_copy()
+
+        if not selected_text:
+            self.get_status_bar().set_idle("nothing selected")
+            return
+
+        self.copy_to_clipboard(selected_text)
+        self.get_status_bar().set_idle("copied selection")
+
     def on_key(self, event: Any) -> None:
         key = str(getattr(event, "key", "") or "")
+
+        if key.lower() in {"up", "down"} and self.is_mounted:
+            matches = self.get_matching_slash_commands(self.get_input_box().get_text())
+
+            if matches:
+                if hasattr(event, "prevent_default"):
+                    event.prevent_default()
+
+                if hasattr(event, "stop"):
+                    event.stop()
+
+                delta = -1 if key.lower() == "up" else 1
+                self.slash_suggestion_index = (
+                    self.slash_suggestion_index + delta
+                ) % len(matches)
+                self.get_slash_suggestions_widget().update(
+                    self.render_slash_suggestions(matches)
+                )
+                return
 
         if key.lower() == "ctrl+r":
             self.action_reset_tokens()

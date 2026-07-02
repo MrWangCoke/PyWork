@@ -5,8 +5,6 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.text import Text
 
 from textual.app import App, ComposeResult
@@ -66,6 +64,28 @@ class MessageBubble(Static):
     MessageBubble {
         width: 100%;
         margin-bottom: 1;
+        padding: 0 1;
+        border: round white;
+    }
+
+    MessageBubble.role-user {
+        border: round cyan;
+    }
+
+    MessageBubble.role-assistant {
+        border: round green;
+    }
+
+    MessageBubble.role-system {
+        border: round yellow;
+    }
+
+    MessageBubble.role-tool {
+        border: round magenta;
+    }
+
+    MessageBubble.role-error {
+        border: round red;
     }
     """
 
@@ -76,7 +96,10 @@ class MessageBubble(Static):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        super().__init__("", id=id, classes=classes)
+        role_class = f"role-{message.role}"
+        merged_classes = f"{classes or ''} {role_class}".strip()
+
+        super().__init__("", id=id, classes=merged_classes)
         self.message = message
 
     def on_mount(self) -> None:
@@ -85,28 +108,26 @@ class MessageBubble(Static):
     def refresh_from_message(self) -> None:
         self.update(self.render_message())
 
-    def render_message(self) -> Panel:
+    def render_message(self) -> Text:
         role = self.message.role
         label = ROLE_LABELS.get(role, role)
-        border_style = ROLE_BORDER_STYLES.get(role, "white")
+        label_style = ROLE_BORDER_STYLES.get(role, "white")
 
         time_text = self.message.created_at.strftime("%H:%M:%S")
         title = f"{label} · {time_text}"
 
         content = self.message.content.strip() or " "
 
-        if role == "error":
-            body = Text(content, style="red")
-        else:
-            body = Markdown(content)
+        text = Text()
+        text.append(title, style=f"bold {label_style}")
+        text.append("\n")
 
-        return Panel(
-            body,
-            title=title,
-            title_align="left",
-            border_style=border_style,
-            expand=True,
-        )
+        if role == "error":
+            text.append(content, style="red")
+        else:
+            text.append(content)
+
+        return text
 
 
 class ChatPanel(Widget):
