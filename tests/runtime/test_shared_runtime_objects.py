@@ -5,6 +5,7 @@ from pywork.runtime.graph import (
     create_default_agent_graph_state,
     create_graph_tool_context,
 )
+from pywork.runtime.shared_objects import normalize_subagent_llm_messages
 from pywork.schemas.tool_schema import create_tool_call
 from pywork.teams.mailbox import AgentMailbox
 from pywork.tools.registry import create_default_registry
@@ -50,6 +51,68 @@ def test_agent_tool_uses_shared_subagent_manager(tmp_path) -> None:
     assert agent_tool is not None
     assert getattr(agent_tool, "manager", None) is engine.subagent_manager
     assert getattr(agent_tool, "_fallback_runtime", None) is None
+
+
+def test_subagent_manager_uses_runtime_llm_config(tmp_path) -> None:
+    engine = RuntimeEngine(
+        config={
+            "workspace": {
+                "path": str(tmp_path),
+            },
+            "llm": {
+                "default_provider": "qwen",
+                "providers": {
+                    "qwen": {
+                        "provider": "qwen",
+                        "api_format": "openai_compatible",
+                        "model": "qwen3.6-flash",
+                        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        "api_key_env": "DASHSCOPE_API_KEY",
+                    }
+                },
+            },
+        },
+    )
+
+    assert engine.subagent_manager.llm is not None
+
+
+def test_subagent_llm_message_normalization_ignores_empty_tool_call_id() -> None:
+    messages = normalize_subagent_llm_messages(
+        [
+            {
+                "role": "system",
+                "content": "review this file",
+                "tool_call_id": None,
+            },
+            {
+                "role": "user",
+                "content": "ok",
+                "name": None,
+                "tool_call_id": None,
+            },
+        ]
+    )
+
+    assert [message.role for message in messages] == ["system", "user"]
+    assert messages[0].content == "review this file"
+
+
+def test_subagent_llm_message_normalization_converts_invalid_tool_message() -> None:
+    messages = normalize_subagent_llm_messages(
+        [
+            {
+                "role": "tool",
+                "name": "agent",
+                "content": "Reviewer finished with status failed.",
+            }
+        ]
+    )
+
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert "Tool observation from agent" in messages[0].content
+    assert "Reviewer finished" in messages[0].content
 
 
 def test_graph_tool_context_contains_shared_objects(tmp_path) -> None:

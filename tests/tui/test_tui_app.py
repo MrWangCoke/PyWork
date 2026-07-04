@@ -213,6 +213,23 @@ async def test_pywork_app_ctrl_c_copies_without_exiting() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pywork_app_copy_log_slash_command_copies_tool_log() -> None:
+    app = PyWorkApp()
+    copied: list[str] = []
+
+    app.copy_to_clipboard = lambda text: copied.append(text)
+
+    async with app.run_test(size=(120, 30)):
+        tool_log = app.get_tool_log()
+        tool_log.append_status("runtime connected")
+
+        assert app.handle_slash_command("/copy-log") is True
+
+        assert copied
+        assert "runtime connected" in copied[-1]
+
+
+@pytest.mark.asyncio
 async def test_pywork_app_commands_dialog_searches_exit() -> None:
     app = PyWorkApp()
 
@@ -242,6 +259,17 @@ def test_commands_dialog_displays_plain_command_names() -> None:
 
     assert row.startswith("exit")
     assert not row.startswith("/exit")
+
+
+def test_commands_dialog_sorts_commands_by_name() -> None:
+    app = PyWorkApp()
+    dialog = CommandsDialog(app.get_slash_commands())
+    names = [
+        command.name
+        for command in dialog.filtered_commands
+    ]
+
+    assert names == sorted(names, key=lambda name: name.lstrip("/").lower())
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,7 @@ class RuntimeEngine:
             registry=self.registry,
             workspace_path=workspace_path,
             config=self.config,
+            event_bus=self.event_bus,
         )
 
         self.subagent_manager = self.runtime_metadata["subagent_manager"]

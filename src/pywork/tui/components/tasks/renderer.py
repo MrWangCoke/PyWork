@@ -5,6 +5,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from pywork.tui.components.friendly_names import (
+    friendly_agent_label,
+    friendly_task_title,
+)
 from pywork.tui.components.tasks.models import (
     TaskProgressRow,
     TaskProgressSnapshot,
@@ -86,6 +90,7 @@ def render_stats(stats: TaskProgressStats) -> Text:
 def render_task_table(
     rows: list[TaskProgressRow],
     *,
+    selected_task_id: str | None = None,
     max_name_width: int = 40,
     max_error_width: int = 36,
 ) -> Table:
@@ -97,6 +102,7 @@ def render_task_table(
         padding=(0, 1),
     )
 
+    table.add_column("", width=1, no_wrap=True)
     table.add_column("Name", ratio=3, overflow="fold")
     table.add_column("Agent", ratio=1, overflow="ellipsis")
     table.add_column("Status", ratio=1, no_wrap=True)
@@ -104,11 +110,17 @@ def render_task_table(
     table.add_column("Error", ratio=2, overflow="fold")
 
     for row in rows:
+        selected = row.task_id == selected_task_id
         name = truncate_text(
-            row.name or row.task_id,
+            friendly_task_title(row),
             max_chars=max_name_width,
         )
-        agent = row.agent or "-"
+        agent = friendly_agent_label(
+            {
+                "agent_name": row.agent,
+                "agent_id": row.agent,
+            }
+        )
         status = row.status
         elapsed = format_duration_ms(row.duration_ms)
         error = truncate_text(
@@ -117,11 +129,13 @@ def render_task_table(
         )
 
         table.add_row(
+            "▶" if selected else "",
             name,
             agent,
             Text(status, style=status_style(status)),
             elapsed,
             Text(error, style="red" if error else "dim"),
+            style="reverse" if selected else None,
         )
 
     return table
@@ -138,6 +152,7 @@ def render_task_progress_panel(
     *,
     title: str = "Background Tasks",
     show_empty: bool = True,
+    selected_task_id: str | None = None,
 ) -> RenderableType:
     body_items: list[RenderableType] = [
         render_stats(snapshot.stats),
@@ -145,7 +160,13 @@ def render_task_progress_panel(
 
     if snapshot.rows:
         body_items.append(
-            render_task_table(snapshot.rows)
+            render_task_table(
+                snapshot.rows,
+                selected_task_id=selected_task_id,
+            )
+        )
+        body_items.append(
+            Text("↑/↓ select · Enter detail · o output · s stop · r retry · c copy", style="dim")
         )
     elif show_empty:
         body_items.append(

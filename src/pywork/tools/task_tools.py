@@ -456,6 +456,123 @@ def execution_to_data(execution: Any) -> dict[str, Any]:
     }
 
 
+def get_mapping_value(
+    data: Mapping[str, Any] | None,
+    *keys: str,
+) -> Any:
+    if not isinstance(data, Mapping):
+        return None
+
+    for key in keys:
+        value = data.get(key)
+
+        if value not in {None, ""}:
+            return value
+
+    return None
+
+
+def normalize_task_status_text(value: Any, *, fallback: str = "created") -> str:
+    raw = safe_jsonable(value)
+
+    if raw is None or raw == "":
+        return fallback
+
+    if isinstance(raw, Mapping):
+        raw = raw.get("value") or raw.get("status") or fallback
+
+    return str(raw)
+
+
+def build_task_creation_notice(
+    *,
+    target: str,
+    args: Mapping[str, Any],
+    task_data: Mapping[str, Any] | None = None,
+    execution_data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    task_data = dict(task_data or {})
+    execution_data = dict(execution_data or {})
+    execution_record = execution_data.get("record")
+
+    if isinstance(execution_record, Mapping):
+        record_data = dict(execution_record)
+    else:
+        record_data = {}
+
+    task_id = (
+        get_mapping_value(task_data, "id", "task_id")
+        or get_mapping_value(execution_data, "task_id", "id")
+        or get_mapping_value(record_data, "id", "task_id")
+        or args.get("task_id")
+        or args.get("id")
+        or "-"
+    )
+
+    name = (
+        get_mapping_value(task_data, "name", "title")
+        or get_mapping_value(record_data, "name", "title")
+        or args.get("name")
+        or args.get("title")
+        or args.get("task")
+        or args.get("description")
+        or args.get("content")
+        or "Task"
+    )
+
+    agent = (
+        get_mapping_value(task_data, "agent_id", "agent_name", "assigned_to")
+        or get_mapping_value(record_data, "agent_id", "agent_name", "assigned_to")
+        or args.get("agent_name")
+        or args.get("agent_id")
+        or args.get("role")
+        or args.get("assigned_to")
+        or "-"
+    )
+
+    status = normalize_task_status_text(
+        get_mapping_value(task_data, "status")
+        or get_mapping_value(record_data, "status"),
+        fallback="running" if execution_data else "created",
+    )
+
+    is_started = bool(execution_data) or status in {
+        "queued",
+        "running",
+        "retrying",
+    }
+
+    return {
+        "kind": "background_task_started" if is_started else "background_task_created",
+        "target": target,
+        "task_id": str(task_id),
+        "agent": str(agent),
+        "name": str(name),
+        "status": status,
+        "started": is_started,
+        "message": "已创建后台任务，可在右侧 Tasks 面板查看进度。",
+    }
+
+
+def render_task_creation_notice(
+    notice: Mapping[str, Any],
+) -> str:
+    headline = (
+        "Started background task:"
+        if notice.get("started")
+        else "Created background task:"
+    )
+
+    return (
+        f"{headline}\n"
+        f"- id: `{notice.get('task_id', '-')}`\n"
+        f"- agent: `{notice.get('agent', '-')}`\n"
+        f"- name: {notice.get('name', '-')}\n"
+        f"- status: `{notice.get('status', '-')}`\n\n"
+        f"{notice.get('message', '已创建后台任务，可在右侧 Tasks 面板查看进度。')}"
+    )
+
+
 async def get_task_record(
     task_manager: Any,
     task_id: str,
@@ -1142,14 +1259,24 @@ class TaskCreateTool(BaseTool):
                     context,
                 )
 
+                task_data = execution_to_data(output)
+
+                notice = build_task_creation_notice(
+                    target="subagent",
+                    args=args,
+                    task_data=task_data.get("record") if isinstance(task_data, Mapping) else {},
+                    execution_data=task_data if isinstance(task_data, Mapping) else {},
+                )
+
                 return make_result(
                     call,
                     tool_name=self.name,
                     success=True,
-                    content="Subagent task created.",
+                    content=render_task_creation_notice(notice),
                     data={
                         "target": "subagent",
-                        "task": execution_to_data(output),
+                        "task": task_data,
+                        "ui_notice": notice,
                     },
                 )
 
@@ -1170,19 +1297,30 @@ class TaskCreateTool(BaseTool):
                     args,
                 )
 
+                task_data = task_record_to_data(task)
+                execution_data = (
+                    execution_to_data(execution)
+                    if execution is not None
+                    else None
+                )
+
+                notice = build_task_creation_notice(
+                    target="task_manager",
+                    args=args,
+                    task_data=task_data,
+                    execution_data=execution_data,
+                )
+
                 return make_result(
                     call,
                     tool_name=self.name,
                     success=True,
-                    content=f"Task created: {getattr(task, 'id', None)}",
+                    content=render_task_creation_notice(notice),
                     data={
                         "target": "task_manager",
-                        "task": task_record_to_data(task),
-                        "execution": (
-                            execution_to_data(execution)
-                            if execution is not None
-                            else None
-                        ),
+                        "task": task_data,
+                        "execution": execution_data,
+                        "ui_notice": notice,
                     },
                 )
 
@@ -1241,14 +1379,23 @@ class TaskCreateTool(BaseTool):
                     ),
                 )
 
+                task_data = team_task_to_data(task)
+
+                notice = build_task_creation_notice(
+                    target="team",
+                    args=args,
+                    task_data=task_data,
+                )
+
                 return make_result(
                     call,
                     tool_name=self.name,
                     success=True,
-                    content=f"Team task created: {task.task_id}",
+                    content=render_task_creation_notice(notice),
                     data={
                         "target": "team",
-                        "task": team_task_to_data(task),
+                        "task": task_data,
+                        "ui_notice": notice,
                     },
                 )
 

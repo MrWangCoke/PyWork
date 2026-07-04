@@ -10,6 +10,11 @@ from pywork.tui.components.agents.models import (
     AgentActivitySnapshot,
     AgentActivityStats,
 )
+from pywork.tui.components.friendly_names import (
+    friendly_agent_activity,
+    friendly_agent_label,
+    role_label,
+)
 
 
 def status_style(status: str) -> str:
@@ -85,6 +90,7 @@ def render_stats(stats: AgentActivityStats) -> Text:
 def render_agent_table(
     rows: list[AgentActivityRow],
     *,
+    selected_agent_id: str | None = None,
     max_task_width: int = 42,
 ) -> Table:
     table = Table(
@@ -95,27 +101,28 @@ def render_agent_table(
         padding=(0, 1),
     )
 
+    table.add_column("", width=1, no_wrap=True)
     table.add_column("Agent", ratio=2, overflow="ellipsis")
     table.add_column("Role", ratio=1, overflow="ellipsis")
     table.add_column("Status", ratio=1, no_wrap=True)
-    table.add_column("Current task", ratio=3, overflow="fold")
-    table.add_column("Run", ratio=1, overflow="ellipsis")
+    table.add_column("Activity", ratio=3, overflow="fold")
     table.add_column("Elapsed", justify="right", no_wrap=True)
 
     for row in rows:
-        current_task = truncate_text(
-            row.current_task or "-",
+        selected = row.agent_id == selected_agent_id
+        activity = truncate_text(
+            friendly_agent_activity(row),
             max_chars=max_task_width,
         )
-        run_text = row.current_run_id or row.current_task_record_id or "-"
 
         table.add_row(
-            row.name or row.agent_id or "-",
-            row.role or "-",
+            "▶" if selected else "",
+            friendly_agent_label(row),
+            role_label(row.role) or "-",
             Text(row.status, style=status_style(row.status)),
-            current_task,
-            run_text,
+            activity,
             format_duration_ms(row.duration_ms),
+            style="reverse" if selected else None,
         )
 
     return table
@@ -132,6 +139,7 @@ def render_agent_activity_panel(
     *,
     title: str = "Active Agents",
     show_empty: bool = True,
+    selected_agent_id: str | None = None,
 ) -> RenderableType:
     body_items: list[RenderableType] = [
         render_stats(snapshot.stats),
@@ -139,7 +147,13 @@ def render_agent_activity_panel(
 
     if snapshot.rows:
         body_items.append(
-            render_agent_table(snapshot.rows)
+            render_agent_table(
+                snapshot.rows,
+                selected_agent_id=selected_agent_id,
+            )
+        )
+        body_items.append(
+            Text("↑/↓ select · Enter inspect · a abort · h history", style="dim")
         )
     elif show_empty:
         body_items.append(

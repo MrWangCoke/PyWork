@@ -176,6 +176,7 @@ class ToolLog(VerticalScroll):
         yield Static(
             self.render_log(),
             id="tool-log-content",
+            markup=False,
         )
 
     def on_mount(self) -> None:
@@ -187,6 +188,9 @@ class ToolLog(VerticalScroll):
 
     def get_entries(self) -> list[ToolLogEntry]:
         return list(self.entries)
+
+    def to_text(self) -> str:
+        return self.render_log()
 
     def append_entry(self, entry: ToolLogEntry) -> ToolLogEntry:
         self.entries.append(entry)

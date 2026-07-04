@@ -5,6 +5,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from pywork.tui.components.friendly_names import (
+    friendly_assignee_label,
+    friendly_team_member_activity,
+    friendly_team_member_label,
+    role_label,
+)
 from pywork.tui.components.teams.models import (
     TeamMailboxStats,
     TeamMemberRow,
@@ -70,9 +76,7 @@ def render_summary(snapshot: TeamViewSnapshot) -> Text:
 
     text = Text()
 
-    text.append(snapshot.name or snapshot.team_id or "Team", style="bold")
-    text.append("  ")
-    text.append(snapshot.team_id, style="dim")
+    text.append(snapshot.name or "Team", style="bold")
 
     if snapshot.description:
         text.append("\n")
@@ -103,6 +107,8 @@ def render_summary(snapshot: TeamViewSnapshot) -> Text:
 
 def render_members_table(
     members: list[TeamMemberRow],
+    *,
+    selected_member_id: str | None = None,
 ) -> RenderableType:
     if not members:
         text = Text()
@@ -117,21 +123,24 @@ def render_members_table(
         padding=(0, 1),
     )
 
+    table.add_column("", width=1, no_wrap=True)
     table.add_column("Member", ratio=2, overflow="ellipsis")
     table.add_column("Role", ratio=1, overflow="ellipsis")
     table.add_column("Agent", ratio=1, overflow="ellipsis")
     table.add_column("Status", ratio=1, no_wrap=True)
-    table.add_column("Run", ratio=1, overflow="ellipsis")
-    table.add_column("Task", ratio=1, overflow="ellipsis")
+    table.add_column("Activity", ratio=2, overflow="fold")
 
     for member in members:
+        selected = member.teammate_id == selected_member_id
+
         table.add_row(
-            member.name or member.teammate_id or "-",
-            member.role or "-",
-            member.agent_name or "-",
+            "▶" if selected else "",
+            friendly_team_member_label(member),
+            role_label(member.role) or "-",
+            role_label(member.agent_name) or friendly_assignee_label(member.agent_name),
             Text(member.status, style=member_status_style(member.status)),
-            member.current_run_id or "-",
-            member.current_task_record_id or "-",
+            friendly_team_member_activity(member),
+            style="reverse" if selected else None,
         )
 
     return table
@@ -169,7 +178,7 @@ def render_tasks_table(
                 max_chars=max_title_width,
             ),
             task.role or "-",
-            task.assigned_to or "-",
+            friendly_assignee_label(task.assigned_to),
             Text(task.status, style=task_status_style(task.status)),
             Text(task.priority, style=priority_style(task.priority)),
             Text(task.error or "", style="red" if task.error else "dim"),
@@ -207,6 +216,7 @@ def render_team_view_panel(
     show_members: bool = True,
     show_tasks: bool = True,
     show_mailbox: bool = True,
+    selected_member_id: str | None = None,
 ) -> RenderableType:
     body_items: list[RenderableType] = [
         render_summary(snapshot),
@@ -214,7 +224,12 @@ def render_team_view_panel(
 
     if show_members:
         body_items.append(Text("Members", style="bold magenta"))
-        body_items.append(render_members_table(snapshot.members))
+        body_items.append(
+            render_members_table(
+                snapshot.members,
+                selected_member_id=selected_member_id,
+            )
+        )
 
     if show_tasks:
         body_items.append(Text("Shared Tasks", style="bold magenta"))
@@ -222,6 +237,10 @@ def render_team_view_panel(
 
     if show_mailbox:
         body_items.append(render_mailbox_stats(snapshot.stats.mailbox))
+
+    body_items.append(
+        Text("↑/↓ select member · m mailbox · d dispatch · n message member", style="dim")
+    )
 
     return Panel(
         Group(*body_items),

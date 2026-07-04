@@ -73,6 +73,48 @@ class PermissionDecision:
     requires_confirmation: bool = False
 
 
+PERMISSION_MODE_DEFAULT = "default"
+PERMISSION_MODE_ACCEPT_EDITS = "accept_edits"
+PERMISSION_MODE_PLAN = "plan"
+PERMISSION_MODE_READONLY = "readonly"
+PERMISSION_MODE_BYPASS = "bypass_permissions"
+
+PERMISSION_MODE_ALIASES: dict[str, str] = {
+    "": PERMISSION_MODE_DEFAULT,
+    "normal": PERMISSION_MODE_DEFAULT,
+    "default": PERMISSION_MODE_DEFAULT,
+    "accept": PERMISSION_MODE_ACCEPT_EDITS,
+    "accept-edits": PERMISSION_MODE_ACCEPT_EDITS,
+    "accept_edits": PERMISSION_MODE_ACCEPT_EDITS,
+    "plan": PERMISSION_MODE_PLAN,
+    "planning": PERMISSION_MODE_PLAN,
+    "readonly": PERMISSION_MODE_READONLY,
+    "read_only": PERMISSION_MODE_READONLY,
+    "read-only": PERMISSION_MODE_READONLY,
+    "safe": PERMISSION_MODE_READONLY,
+    "bypass": PERMISSION_MODE_BYPASS,
+    "bypass_permissions": PERMISSION_MODE_BYPASS,
+    "dangerous": PERMISSION_MODE_BYPASS,
+}
+
+VALID_PERMISSION_MODES: set[str] = {
+    PERMISSION_MODE_DEFAULT,
+    PERMISSION_MODE_ACCEPT_EDITS,
+    PERMISSION_MODE_PLAN,
+    PERMISSION_MODE_READONLY,
+    PERMISSION_MODE_BYPASS,
+}
+
+
+def normalize_permission_mode(mode: str | None) -> str:
+    text = str(mode or PERMISSION_MODE_DEFAULT).strip().lower()
+
+    return PERMISSION_MODE_ALIASES.get(
+        text,
+        PERMISSION_MODE_DEFAULT,
+    )
+
+
 class AgentGraphData(TypedDict, total=False):
 
     registry: ToolRegistry
@@ -174,17 +216,17 @@ def get_config(data: AgentGraphData) -> dict[str, Any]:
 def get_permission_mode(data: AgentGraphData) -> str:
     config = get_config(data)
 
-    return str(
+    raw_mode = get_nested_config_value(
+        config,
+        "permissions.mode",
         get_nested_config_value(
             config,
-            "permissions.mode",
-            get_nested_config_value(
-                config,
-                "app.permission_mode",
-                "default",
-            ),
-        )
+            "app.permission_mode",
+            PERMISSION_MODE_DEFAULT,
+        ),
     )
+
+    return normalize_permission_mode(str(raw_mode))
 
 
 def get_workspace_path(data: AgentGraphData) -> str:
@@ -992,6 +1034,10 @@ Critical tool-selection rules:
 4. After a tool result is provided, do not call another tool unless it is truly necessary. Answer the user directly using the tool result.
 
 5. Never summarize a file you have not read. For file summaries, read the file first, then summarize the tool result clearly and briefly.
+
+6. If the user asks to create a background task, mentions the Tasks panel, or says not to wait for completion,
+   use task_create with target="subagent" and wait=false. Do not use agent.run for background tasks,
+   because direct agent runs are not TaskRecords.
 """.strip()
 
 
@@ -1929,13 +1975,18 @@ def risk_value(risk_level: ToolRiskLevel | str) -> int:
 
 
 def max_allowed_risk_for_permission_mode(mode: str) -> ToolRiskLevel:
-    if mode == "bypass_permissions":
+    normalized_mode = normalize_permission_mode(mode)
+
+    if normalized_mode == PERMISSION_MODE_BYPASS:
         return ToolRiskLevel.DANGEROUS
 
-    if mode == "accept_edits":
+    if normalized_mode == PERMISSION_MODE_ACCEPT_EDITS:
         return ToolRiskLevel.MEDIUM
 
-    if mode == "plan":
+    if normalized_mode == PERMISSION_MODE_PLAN:
+        return ToolRiskLevel.SAFE
+
+    if normalized_mode == PERMISSION_MODE_READONLY:
         return ToolRiskLevel.SAFE
 
     return ToolRiskLevel.LOW
@@ -1952,10 +2003,13 @@ def evaluate_permission(
 
     Permission mode determines max allowed risk level:
     - plan mode: no tools execute at all
+    - readonly: only safe tools execute
     - default: safe/low risk tools allowed
     - accept_edits: safe/low/medium risk tools allowed
     - bypass_permissions: all tools allowed
     """
+    permission_mode = normalize_permission_mode(permission_mode)
+
     if call is None:
         return PermissionDecision(
             allowed=True,
@@ -1963,7 +2017,7 @@ def evaluate_permission(
             requires_confirmation=False,
         )
 
-    if permission_mode == "plan":
+    if permission_mode == PERMISSION_MODE_PLAN:
         return PermissionDecision(
             allowed=False,
             reason=f"plan mode does not execute tools: {call.tool_name}",

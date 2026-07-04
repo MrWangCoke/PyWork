@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pywork.llm.router import create_llm_router
+from pywork.schemas.message_schema import AnyMessage, message_from_dict
 from pywork.subagents.manager import (
     SubAgentManager,
     create_default_subagent_manager,
@@ -12,6 +14,12 @@ from pywork.teams.mailbox import AgentMailbox, create_agent_mailbox
 from pywork.teams.team import Team, create_team
 from pywork.tools.registry import ToolRegistry
 
+from pywork.runtime.events import (
+    RuntimeEvent,
+    RuntimeEventBus,
+    RuntimeEventSource,
+)
+from pywork.tasks.task import TaskEvent
 
 def registry_get_tool(
     registry: Any,
@@ -253,14 +261,229 @@ def ensure_runtime_team(
 
     return team
 
+def task_event_to_runtime_status(event: TaskEvent) -> str:
+    event_type = str(getattr(event.event_type, "value", event.event_type))
+
+    mapping = {
+        "created": "task_created",
+        "queued": "task_queued",
+        "started": "task_started",
+        "retrying": "task_retrying",
+        "succeeded": "task_finished",
+        "failed": "task_failed",
+        "cancelled": "task_cancelled",
+        "aborted": "task_aborted",
+        "updated": "task_updated",
+    }
+
+    return mapping.get(event_type, f"task_{event_type}")
+
+
+def task_event_to_runtime_metadata(event: TaskEvent) -> dict[str, Any]:
+    event_type = str(getattr(event.event_type, "value", event.event_type))
+    status = str(getattr(event.status, "value", event.status))
+
+    to_dict = getattr(event, "to_dict", None)
+
+    if callable(to_dict):
+        try:
+            event_data = to_dict()
+        except Exception:
+            event_data = {}
+    else:
+        event_data = {}
+
+    return {
+        "category": "task",
+        "task_event": True,
+        "task_id": event.task_id,
+        "task_event_type": event_type,
+        "task_status": status,
+        "task_event_data": event_data,
+    }
+
+
+def bridge_task_manager_events_to_runtime_event_bus(
+    metadata: dict[str, Any],
+    *,
+    task_manager: Any,
+    event_bus: RuntimeEventBus | None,
+) -> None:
+    """
+    把 TaskManager 自己的 TaskEvent 桥接到 RuntimeEventBus。
+
+    这样 TUI 不必一直轮询 TaskManager。
+    后续 TaskPanel 可以收到 task_started / task_finished / task_failed
+    之类的 RuntimeEvent 后局部刷新。
+    """
+    if task_manager is None or event_bus is None:
+        return
+
+    add_event_handler = getattr(task_manager, "add_event_handler", None)
+
+    if not callable(add_event_handler):
+        return
+
+    bridge_handlers = getattr(
+        task_manager,
+        "_runtime_event_bus_bridge_handlers",
+        None,
+    )
+
+    if not isinstance(bridge_handlers, dict):
+        bridge_handlers = {}
+        setattr(
+            task_manager,
+            "_runtime_event_bus_bridge_handlers",
+            bridge_handlers,
+        )
+
+    bus_key = id(event_bus)
+
+    if bus_key in bridge_handlers:
+        return
+
+    async def handle_task_event(event: TaskEvent) -> None:
+        runtime_event = RuntimeEvent.status_event(
+            status=task_event_to_runtime_status(event),
+            content=getattr(event, "message", "") or "",
+            source=RuntimeEventSource.SYSTEM,
+            metadata={
+                **task_event_to_runtime_metadata(event),
+                "source": "task_manager_event_bridge",
+            },
+        )
+
+        await event_bus.emit_async(runtime_event)
+
+    add_event_handler(handle_task_event)
+    bridge_handlers[bus_key] = handle_task_event
+
+    metadata["task_event_bridge_ready"] = True
+
+
+def has_runtime_llm_config(config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+
+    llm_config = config.get("llm")
+
+    if isinstance(llm_config, dict) and llm_config:
+        return True
+
+    return bool(
+        config.get("providers")
+        or config.get("provider")
+        or config.get("model")
+    )
+
+
+def normalize_subagent_llm_messages(
+    messages: list[dict[str, Any]],
+) -> list[AnyMessage]:
+    normalized: list[AnyMessage] = []
+
+    for message in messages:
+        if isinstance(message, dict):
+            normalized.append(
+                message_from_dict(
+                    normalize_subagent_llm_message_dict(message)
+                )
+            )
+            continue
+
+        normalized.append(
+            message_from_dict(
+                {
+                    "role": "user",
+                    "content": str(message),
+                }
+            )
+        )
+
+    return normalized
+
+
+def normalize_subagent_llm_message_dict(
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Convert lightweight runtime messages to strict schema messages.
+
+    AgentMessage.to_dict() includes optional fields like tool_call_id even when
+    they are None. System/User/Assistant schemas forbid that extra field, so the
+    SubAgent LLM adapter must strip it before validation.
+    """
+    role = str(message.get("role", "user"))
+    payload = {
+        key: value
+        for key, value in message.items()
+        if value is not None
+    }
+
+    if role == "tool":
+        tool_name = payload.get("tool_name") or payload.get("name")
+        tool_call_id = payload.get("tool_call_id")
+
+        if tool_name and tool_call_id:
+            payload["tool_name"] = str(tool_name)
+            payload["tool_call_id"] = str(tool_call_id)
+            return payload
+
+        content = str(payload.get("content", "") or "")
+
+        if tool_name:
+            content = f"Tool observation from {tool_name}:\n\n{content}"
+        else:
+            content = f"Tool observation:\n\n{content}"
+
+        metadata = payload.get("metadata", {})
+
+        return {
+            "role": "user",
+            "content": content,
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    if role != "tool":
+        payload.pop("tool_call_id", None)
+        payload.pop("tool_name", None)
+
+    return payload
+
+
+def create_runtime_subagent_llm(
+    config: dict[str, Any] | None,
+) -> Any | None:
+    if not has_runtime_llm_config(config):
+        return None
+
+    router = create_llm_router(config)
+
+    async def runtime_subagent_llm(
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        return await router.chat(
+            normalize_subagent_llm_messages(messages),
+            tools=tools,
+            metadata=metadata or {},
+        )
+
+    return runtime_subagent_llm
+
 
 def ensure_subagent_manager(
     metadata: dict[str, Any],
     *,
     registry: ToolRegistry | None = None,
     workspace_path: str | Path = ".",
+    config: dict[str, Any] | None = None,
 ) -> SubAgentManager:
     existing = metadata.get("subagent_manager")
+    llm = create_runtime_subagent_llm(config)
 
     if isinstance(existing, SubAgentManager):
         manager = existing
@@ -271,6 +494,7 @@ def ensure_subagent_manager(
         task_manager = metadata.get("task_manager")
 
         manager = create_default_subagent_manager(
+            llm=llm,
             workspace_path=workspace_path,
             task_manager=task_manager,
             tool_definitions=registry_tool_definitions(registry),
@@ -278,6 +502,9 @@ def ensure_subagent_manager(
                 "source": "runtime.shared_objects",
             },
         )
+
+    if getattr(manager, "llm", None) is None and llm is not None:
+        manager.llm = llm
 
     metadata["subagent_manager"] = manager
     metadata["manager"] = manager
@@ -298,6 +525,7 @@ def ensure_runtime_shared_objects(
     registry: ToolRegistry | None = None,
     workspace_path: str | Path = ".",
     config: dict[str, Any] | None = None,
+    event_bus: RuntimeEventBus | None = None,
 ) -> dict[str, Any]:
     """
     确保 Runtime / ToolExecutionContext 使用同一批共享对象。
@@ -339,6 +567,7 @@ def ensure_runtime_shared_objects(
         shared,
         registry=registry,
         workspace_path=workspace_path,
+        config=config,
     )
 
     team = ensure_runtime_team(
@@ -354,6 +583,14 @@ def ensure_runtime_shared_objects(
     shared["subagent_manager"] = manager
     shared["task_manager"] = manager.task_manager
 
-    shared["runtime_shared_objects_ready"] = True
+    if event_bus is not None:
+        shared["event_bus"] = event_bus
 
+    bridge_task_manager_events_to_runtime_event_bus(
+        shared,
+        task_manager=manager.task_manager,
+        event_bus=event_bus,
+    )
+
+    shared["runtime_shared_objects_ready"] = True
     return shared

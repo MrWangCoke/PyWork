@@ -38,6 +38,7 @@ def get_task_id(task: Any) -> str:
     value = (
         get_attr(task, "id")
         or get_attr(task, "task_id")
+        or get_attr(task, "run_id")
         or get_attr(task, "record_id")
         or ""
     )
@@ -242,6 +243,56 @@ async def collect_task_records_from_manager(
         return values
 
     return []
+
+
+async def collect_subagent_run_records(
+    subagent_manager: Any,
+    *,
+    limit: int | None = None,
+) -> list[Any]:
+    records: list[Any] = []
+
+    get_active_runs = getattr(subagent_manager, "get_active_runs", None)
+
+    if callable(get_active_runs):
+        active_runs = await maybe_await(get_active_runs())
+
+        if active_runs is not None:
+            records.extend(list(active_runs))
+
+    get_history = getattr(subagent_manager, "get_history", None)
+
+    if callable(get_history):
+        try:
+            history = await maybe_await(
+                get_history(
+                    limit=limit,
+                )
+            )
+        except TypeError:
+            history = await maybe_await(get_history())
+
+        if history is not None:
+            records.extend(list(history))
+
+    seen: set[str] = set()
+    deduped: list[Any] = []
+
+    for record in records:
+        record_id = get_task_id(record)
+
+        if record_id and record_id in seen:
+            continue
+
+        if record_id:
+            seen.add(record_id)
+
+        deduped.append(record)
+
+    if limit is not None:
+        deduped = deduped[:limit]
+
+    return deduped
 
 
 def collect_active_task_ids(task_manager: Any) -> set[str]:
